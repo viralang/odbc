@@ -9,7 +9,7 @@
 
 Use `conn.exec(sql)` to execute DDL statements or raw DML queries:
 
-```vira
+```v
 _ := conn.exec("
 	CREATE TABLE IF NOT EXISTS orders (
 		id INT PRIMARY KEY,
@@ -30,7 +30,7 @@ The `odbc` package provides SQL-injection-safe literal escaping (`odbc.escape_li
 ### Inserting Rows (`insert_row` & `build_insert_sql`)
 Pass `"NULL"` as a value string whenever you want to insert a SQL `NULL`:
 
-```vira
+```v
 mut cols := []string{}
 cols.push("id")
 cols.push("customer")
@@ -53,7 +53,7 @@ println("Inserted ${affected} row(s)")
 ### Upserting Rows (`build_upsert_postgres_sql`)
 For PostgreSQL, SQLite, and DuckDB `INSERT ... ON CONFLICT DO UPDATE`:
 
-```vira
+```v
 mut update_cols := []string{}
 update_cols.push("total_usd")
 update_cols.push("status")
@@ -63,7 +63,7 @@ _ := conn.exec(upsert_sql)!
 ```
 
 ### Updating Rows (`update_rows` & `build_update_sql`)
-```vira
+```v
 mut set_cols := []string{}
 set_cols.push("status")
 set_cols.push("notes")
@@ -77,7 +77,7 @@ println("Updated ${updated} row(s)")
 ```
 
 ### Deleting Rows (`delete_rows` & `build_delete_sql`)
-```vira
+```v
 deleted := conn.delete_rows("orders", "status = 'CANCELLED'")!
 println("Deleted ${deleted} cancelled order(s)")
 ```
@@ -87,7 +87,7 @@ println("Deleted ${deleted} cancelled order(s)")
 ## 3. ACID Transactions & Atomic Batch Execution
 
 ### Manual Transaction Control (`begin_tx`, `commit`, `rollback`)
-```vira
+```v
 conn.begin_tx()!
 
 _ := conn.exec("UPDATE accounts SET balance = balance - 500 WHERE id = 1") or {
@@ -106,7 +106,7 @@ conn.commit()!
 ### Atomic Batch Execution (`exec_batch_tx`)
 Use `conn.exec_batch_tx(statements)` to run a slice of SQL statements inside a single transaction. If any statement in the slice fails, `exec_batch_tx` automatically rolls back the entire batch and returns the error with the failing statement index:
 
-```vira
+```v
 mut batch := []string{}
 batch.push("INSERT INTO audit_log (event, actor) VALUES ('TX_START', 'system');")
 batch.push("UPDATE inventory SET qty = qty - 1 WHERE sku = 'VIRA-GPU-01';")
@@ -125,7 +125,7 @@ println("Batch committed! Total affected rows: ${total_affected}")
 
 When executing a query repeatedly, compile it once on the database server using `conn.prepare(sql)`:
 
-```vira
+```v
 mut stmt := conn.prepare("SELECT id, customer, total_usd FROM orders WHERE status = 'PAID'")!
 defer stmt.close()
 

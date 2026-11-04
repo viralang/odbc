@@ -1,11 +1,21 @@
-# 1. Tell GitHub Linguist to syntax-highlight .vir files and count them in the repo language bar
+# 1. Tell GitHub Linguist to recognize .vir and vira.mod files as Vira in the repository language bar
 *.vir linguist-detectable=true
 *.vir linguist-language=Vira
+vira.mod linguist-detectable=true
+vira.mod linguist-language=Vira
 
- 
-# 2. Exclude generated C99 outputs, packages, and docs from skewing the language percentage bar
+# Ensure src, examples, and tests are counted as source code (not documentation/examples)
+src/** linguist-documentation=false
+src/** linguist-detectable=true
+examples/** linguist-documentation=false
+examples/** linguist-detectable=true
+tests/** linguist-documentation=false
+tests/** linguist-detectable=true
+
+# 2. Exclude generated C99 outputs and markdown documentation from skewing the language percentage bar
 build/** linguist-generated=true
 dist/** linguist-generated=true
 scratch/** linguist-generated=true
 *.md linguist-documentation=true
 docs/** linguist-documentation=true
+tutorials/** linguist-documentation=true

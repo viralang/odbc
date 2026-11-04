@@ -19,7 +19,7 @@ The `odbc.Connection` type provides four query methods tailored to different acc
 ### Typed Row Accessors (`Row`)
 Every `odbc.Row` supports both column-name and 0-based index lookups with automatic type parsing and `NULL` detection:
 
-```vira
+```v
 rs := conn.query("SELECT id, service, latency_ms, healthy, last_error FROM cluster_nodes")!
 
 for mut i := 0; i < rs.row_count(); i += 1 {
@@ -45,7 +45,7 @@ for mut i := 0; i < rs.row_count(); i += 1 {
 
 ### Pretty-Printing ASCII Tables (`to_ascii_table`)
 Render any `ResultSet` into an aligned ASCII box table for terminal output or logs:
-```vira
+```v
 table_str := rs.to_ascii_table()
 println(table_str)
 ```
@@ -60,7 +60,7 @@ Output:
 ```
 
 ### In-Memory Filtering & Column Extraction (`filter_eq`, `column_values`)
-```vira
+```v
 // Filter a ResultSet by column value without re-querying the database
 eu_nodes := rs.filter_eq("region", "eu-central-1")
 
@@ -70,7 +70,7 @@ service_names := eu_nodes.column_values("service")
 
 ### Exporting to CSV & JSON (`to_csv`, `to_json`)
 Export any `ResultSet` directly to RFC-4180 CSV or a JSON array of objects (with SQL `NULL` values preserved as JSON `null`):
-```vira
+```v
 csv_payload  := eu_nodes.to_csv()
 json_payload := eu_nodes.to_json()
 ```
@@ -84,7 +84,7 @@ Different SQL engines use different syntax for pagination:
 - **Microsoft SQL Server & Oracle 12c+**: `ORDER BY ... OFFSET <offset> ROWS FETCH NEXT <page_size> ROWS ONLY`
 
 ### Dialect-Aware Offset Pagination (`query_page` & `build_paginated_sql`)
-```vira
+```v
 // Create a PageRequest for Page 2 (25 rows per page, ordered by id ASC)
 req := odbc.new_page_request(2, 25, "id ASC", odbc.DIALECT_POSTGRES)
 
@@ -110,7 +110,7 @@ sql_ms := odbc.build_paginated_sql("SELECT id, service FROM cluster_nodes", req_
 ### High-Performance Keyset / Cursor Pagination (`build_keyset_sql`)
 For large tables with millions of rows where `OFFSET` scans become slow, use `odbc.build_keyset_sql` to seek directly past the last seen cursor value using an index (`O(1)` lookup):
 
-```vira
+```v
 // Fetch the next 25 rows after id = '1050' in ascending order
 seek_sql := odbc.build_keyset_sql(
 	"SELECT id, service, latency_ms FROM cluster_nodes WHERE healthy = true",
@@ -126,7 +126,7 @@ seek_sql := odbc.build_keyset_sql(
 ### In-Memory `ResultSet` Pagination (`rs.paginate`)
 When caching a `ResultSet` in memory, slice any page on demand with `rs.paginate(page, page_size)`:
 
-```vira
+```v
 for mut p := 1; p <= 3; p += 1 {
 	page := rs.paginate(p, 2)
 	println("Page ${page.page}/${page.total_pages} (${page.rows.len} rows)")

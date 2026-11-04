@@ -18,7 +18,7 @@ Opening a new TCP/TLS database connection and authenticating on every HTTP reque
 
 Call `odbc.enable_driver_pooling(per_driver, relaxed_match)` once at the start of `main()` before creating any `Env` or `Connection`:
 
-```vira
+```v
 module main
 
 import odbc
@@ -40,7 +40,7 @@ fn main() {
 ### Configuring & Initializing a Pool
 Use `odbc.default_pool_config(conn_str, max_conns)` or construct `odbc.PoolConfig` directly:
 
-```vira
+```v
 dsn := odbc.postgres_dsn("", "127.0.0.1", 5432, "production", "postgres", "secret")
 
 cfg := odbc.PoolConfig{
@@ -60,7 +60,7 @@ defer pool.close_all()
 ### Acquiring & Releasing Connections
 Lease a connection from the pool using `pool.acquire()` and return it when finished using `pool.release(mut conn)`:
 
-```vira
+```v
 mut conn := pool.acquire() or {
 	eprintln("Pool exhausted or database unreachable: ${err}")
 	return
@@ -85,7 +85,7 @@ pool.release(mut conn)
 
 Inspect live pool utilization at any time via `pool.stats()`:
 
-```vira
+```v
 st := pool.stats()
 println("Pool Telemetry:")
 println("  Max Capacity         : ${st.max_conns}")

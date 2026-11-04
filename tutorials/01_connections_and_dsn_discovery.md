@@ -21,7 +21,7 @@ The `odbc` package binds Vira directly to the industry-standard C99 ODBC 3.x API
 
 Before opening a database connection, you can inspect all ODBC drivers and pre-configured Data Source Names (DSNs) registered on the host machine:
 
-```vira
+```v
 module main
 
 import odbc
@@ -54,7 +54,7 @@ fn main() {
 
 Use the built-in DSN helper functions in [`src/types.vir`](../src/types.vir) to generate standard ODBC connection strings. Passing `""` as the `driver` argument automatically selects the standard driver name for that database engine:
 
-```vira
+```v
 // PostgreSQL (defaults to "PostgreSQL Unicode")
 pg_dsn := odbc.postgres_dsn("", "127.0.0.1", 5432, "analytics", "postgres", "secret")
 
@@ -76,7 +76,7 @@ duck_dsn := odbc.duckdb_dsn("", ":memory:")
 ## 4. Establishing & Verifying Connections
 
 ### Connecting with Default Timeout (10s)
-```vira
+```v
 mut conn := odbc.connect(pg_dsn) or {
 	eprintln("Database connection failed: ${err}")
 	return
@@ -85,7 +85,7 @@ defer conn.close()
 ```
 
 ### Connecting with Explicit Login & Connection Timeout
-```vira
+```v
 mut conn := odbc.connect_with_timeout(mssql_dsn, 5) or {
 	eprintln("Connection timed out or failed: ${err}")
 	return
@@ -95,14 +95,14 @@ defer conn.close()
 
 ### Connecting via Named DSN (`SQLConnect`)
 If your system administrator has configured a named DSN in `/etc/odbc.ini`:
-```vira
+```v
 mut conn := odbc.connect_dsn("ProdWarehouseDSN", "db_user", "db_password")!
 defer conn.close()
 ```
 
 ### Checking Connection Liveness (`ping`)
 Use `conn.ping()` to execute a lightweight `SELECT 1` round-trip check:
-```vira
+```v
 if conn.ping() {
 	println("Database connection is healthy and responsive!")
 }

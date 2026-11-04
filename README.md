@@ -51,7 +51,7 @@ vira add github.com/viralang/odbc
 
 Or add it to your project's `vira.mod`:
 
-```vira
+```v
 module my_app
 vira 0.7.1
 
