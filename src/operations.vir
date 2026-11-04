@@ -1,0 +1,526 @@
+module odbc
+
+// ============================================================================
+// 1. SQL DIALECTS & SAFE IDENTIFIER / LITERAL ESCAPING
+// ============================================================================
+
+pub const DIALECT_POSTGRES  = 1
+pub const DIALECT_MYSQL     = 2
+pub const DIALECT_SQLITE    = 3
+pub const DIALECT_DUCKDB    = 4
+pub const DIALECT_SQLSERVER = 5
+pub const DIALECT_ORACLE    = 6
+
+// escape_literal doubles single quotes (' -> '') to prevent SQL injection in string literals.
+pub fn escape_literal(val string) string {
+	return val.replace("'", "''")
+}
+
+// quote_ident quotes a table or column identifier according to the target SQL dialect.
+pub fn quote_ident(ident string, dialect int) string {
+	if dialect == DIALECT_MYSQL {
+		clean := ident.replace("`", "``")
+		return "`${clean}`"
+	}
+	if dialect == DIALECT_SQLSERVER {
+		clean := ident.replace("]", "]]")
+		return "[${clean}]"
+	}
+	clean := ident.replace("\"", "\"\"")
+	return "\"${clean}\""
+}
+
+// ============================================================================
+// 2. FULL CRUD SQL BUILDERS (INSERT, UPSERT, UPDATE, DELETE)
+// ============================================================================
+
+// build_insert_sql constructs an INSERT INTO statement with escaped string literals
+// (pass "NULL" for SQL NULL values).
+pub fn build_insert_sql(table string, columns []string, values []string) string {
+	mut cols_str := ""
+	for mut i := 0; i < columns.len; i += 1 {
+		c := columns[i]
+		if i == 0 {
+			cols_str = c.clone()
+		} else {
+			cols_str = "${cols_str}, ${c}"
+		}
+	}
+
+	mut vals_str := ""
+	for mut i := 0; i < values.len; i += 1 {
+		v := values[i]
+		mut formatted := ""
+		if v == "NULL" {
+			formatted = "NULL"
+		} else {
+			esc := escape_literal(v)
+			formatted = "'${esc}'"
+		}
+		if i == 0 {
+			vals_str = formatted.clone()
+		} else {
+			vals_str = "${vals_str}, ${formatted}"
+		}
+	}
+
+	return "INSERT INTO ${table} (${cols_str}) VALUES (${vals_str});"
+}
+
+// build_upsert_postgres_sql constructs a PostgreSQL/SQLite/DuckDB INSERT ... ON CONFLICT DO UPDATE statement.
+pub fn build_upsert_postgres_sql(table string, columns []string, values []string, conflict_col string, update_cols []string) string {
+	base := build_insert_sql(table, columns, values)
+	trimmed := base.substr(0, base.len - 1)
+
+	mut sets := ""
+	for mut i := 0; i < update_cols.len; i += 1 {
+		u := update_cols[i]
+		clause := "${u} = EXCLUDED.${u}"
+		if i == 0 {
+			sets = clause.clone()
+		} else {
+			sets = "${sets}, ${clause}"
+		}
+	}
+
+	return "${trimmed} ON CONFLICT (${conflict_col}) DO UPDATE SET ${sets};"
+}
+
+// build_update_sql constructs an UPDATE ... SET ... WHERE statement with escaped literals.
+pub fn build_update_sql(table string, set_columns []string, set_values []string, where_clause string) string {
+	mut sets := ""
+	limit := set_columns.len
+	for mut i := 0; i < limit && i < set_values.len; i += 1 {
+		col := set_columns[i]
+		val := set_values[i]
+		mut assign := ""
+		if val == "NULL" {
+			assign = "${col} = NULL"
+		} else {
+			esc := escape_literal(val)
+			assign = "${col} = '${esc}'"
+		}
+		if i == 0 {
+			sets = assign.clone()
+		} else {
+			sets = "${sets}, ${assign}"
+		}
+	}
+
+	if where_clause.len == 0 {
+		return "UPDATE ${table} SET ${sets};"
+	}
+	return "UPDATE ${table} SET ${sets} WHERE ${where_clause};"
+}
+
+// build_delete_sql constructs a DELETE FROM ... WHERE statement.
+pub fn build_delete_sql(table string, where_clause string) string {
+	if where_clause.len == 0 {
+		return "DELETE FROM ${table};"
+	}
+	return "DELETE FROM ${table} WHERE ${where_clause};"
+}
+
+// ============================================================================
+// 3. CONNECTION FULL DATABASE OPERATIONS (PING, CRUD, BATCH TX)
+// ============================================================================
+
+// ping verifies that the connection is open and responsive by executing `SELECT 1`.
+pub fn (c Connection) ping() bool {
+	if !c.is_connected {
+		return false
+	}
+	if c.hdbc == null_ptr() {
+		return true
+	}
+	val := c.query_scalar("SELECT 1") or {
+		return false
+	}
+	return val.len > 0
+}
+
+// query_row executes a SELECT statement and returns the first Row, or an error if 0 rows matched.
+pub fn (c Connection) query_row(sql string) !Row {
+	rs := c.query(sql)!
+	return rs.first()!
+}
+
+// query_int executes a scalar query (such as `SELECT COUNT(*) FROM users`) and returns the integer value.
+pub fn (c Connection) query_int(sql string) !int {
+	s := c.query_scalar(sql)!
+	trimmed := s.trim()
+	return trimmed.to_int()!
+}
+
+// insert_row builds and executes an INSERT INTO statement on the connection.
+pub fn (c Connection) insert_row(table string, columns []string, values []string) !int {
+	sql := build_insert_sql(table, columns, values)
+	return c.exec(sql)!
+}
+
+// update_rows builds and executes an UPDATE statement on the connection.
+pub fn (c Connection) update_rows(table string, set_columns []string, set_values []string, where_clause string) !int {
+	sql := build_update_sql(table, set_columns, set_values, where_clause)
+	return c.exec(sql)!
+}
+
+// delete_rows builds and executes a DELETE FROM statement on the connection.
+pub fn (c Connection) delete_rows(table string, where_clause string) !int {
+	sql := build_delete_sql(table, where_clause)
+	return c.exec(sql)!
+}
+
+// exec_batch_tx executes a slice of SQL statements atomically inside a single ACID transaction.
+// If any statement fails, all prior changes in the batch are automatically rolled back.
+pub fn (mut c Connection) exec_batch_tx(statements []string) !int {
+	if !c.is_connected {
+		return error("cannot execute batch on a closed ODBC connection")
+	}
+	c.begin_tx()!
+	mut total_affected := 0
+	for mut i := 0; i < statements.len; i += 1 {
+		stmt_sql := statements[i]
+		affected := c.exec(stmt_sql) or {
+			_ := c.rollback() or { false }
+			return error("batch failed at statement [${i}]: ${err}")
+		}
+		total_affected += affected
+	}
+	c.commit()!
+	return total_affected
+}
+
+// ============================================================================
+// 4. PAGINATION ENGINE (OFFSET/LIMIT, KEYSET/SEEK, & IN-MEMORY SLICING)
+// ============================================================================
+
+// PageRequest defines parameters for dialect-aware SQL pagination.
+pub struct PageRequest {
+pub mut:
+	page      int
+	page_size int
+	order_by  string
+	dialect   int
+}
+
+// new_page_request creates a validated PageRequest (1-indexed page number).
+pub fn new_page_request(page int, page_size int, order_by string, dialect int) PageRequest {
+	mut p := page
+	if p < 1 {
+		p = 1
+	}
+	mut ps := page_size
+	if ps < 1 {
+		ps = 10
+	}
+	return PageRequest{
+		page:      p,
+		page_size: ps,
+		order_by:  order_by.clone(),
+		dialect:   dialect,
+	}
+}
+
+// PageResult contains a single page of rows along with complete pagination metadata.
+pub struct PageResult {
+pub mut:
+	columns     []string
+	rows        []Row
+	page        int
+	page_size   int
+	total_rows  int
+	total_pages int
+	offset      int
+	has_prev    bool
+	has_next    bool
+}
+
+// build_paginated_sql generates a dialect-specific paginated SELECT query using either
+// `LIMIT ... OFFSET ...` (PostgreSQL, MySQL, SQLite, DuckDB) or
+// `OFFSET ... ROWS FETCH NEXT ... ROWS ONLY` (SQL Server, Oracle 12c+).
+pub fn build_paginated_sql(base_sql string, req PageRequest) string {
+	mut page := req.page
+	if page < 1 {
+		page = 1
+	}
+	mut page_size := req.page_size
+	if page_size < 1 {
+		page_size = 10
+	}
+	offset := (page - 1) * page_size
+
+	mut order_clause := ""
+	if req.order_by.len > 0 {
+		order_clause = " ORDER BY ${req.order_by}"
+	} else if req.dialect == DIALECT_SQLSERVER || req.dialect == DIALECT_ORACLE {
+		order_clause = " ORDER BY (SELECT NULL)"
+	}
+
+	if req.dialect == DIALECT_SQLSERVER || req.dialect == DIALECT_ORACLE {
+		return "${base_sql}${order_clause} OFFSET ${offset} ROWS FETCH NEXT ${page_size} ROWS ONLY;"
+	}
+	return "${base_sql}${order_clause} LIMIT ${page_size} OFFSET ${offset};"
+}
+
+// build_keyset_sql generates an O(1) index-friendly keyset (cursor/seek) pagination query.
+pub fn build_keyset_sql(base_sql string, cursor_col string, last_seen_val string, page_size int, ascending bool, dialect int) string {
+	mut op := ">"
+	mut dir := "ASC"
+	if !ascending {
+		op = "<"
+		dir = "DESC"
+	}
+	mut join_kw := "WHERE"
+	lower := base_sql.to_lower()
+	if lower.contains(" where ") {
+		join_kw = "AND"
+	}
+
+	esc := escape_literal(last_seen_val)
+	if dialect == DIALECT_SQLSERVER || dialect == DIALECT_ORACLE {
+		return "${base_sql} ${join_kw} ${cursor_col} ${op} '${esc}' ORDER BY ${cursor_col} ${dir} OFFSET 0 ROWS FETCH NEXT ${page_size} ROWS ONLY;"
+	}
+	return "${base_sql} ${join_kw} ${cursor_col} ${op} '${esc}' ORDER BY ${cursor_col} ${dir} LIMIT ${page_size};"
+}
+
+// query_page executes `count_sql` to compute total rows/pages and then executes the paginated `base_sql`.
+pub fn (c Connection) query_page(base_sql string, count_sql string, req PageRequest) !PageResult {
+	total_rows := c.query_int(count_sql)!
+	mut page := req.page
+	if page < 1 {
+		page = 1
+	}
+	mut page_size := req.page_size
+	if page_size < 1 {
+		page_size = 10
+	}
+	offset := (page - 1) * page_size
+	mut total_pages := (total_rows + page_size - 1) / page_size
+	if total_pages < 1 {
+		total_pages = 1
+	}
+
+	sql := build_paginated_sql(base_sql, req)
+	rs := c.query(sql)!
+
+	return PageResult{
+		columns:     rs.columns.clone(),
+		rows:        rs.rows.clone(),
+		page:        page,
+		page_size:   page_size,
+		total_rows:  total_rows,
+		total_pages: total_pages,
+		offset:      offset,
+		has_prev:    page > 1,
+		has_next:    page < total_pages,
+	}
+}
+
+// paginate slices a materialized ResultSet into a PageResult for in-memory pagination.
+pub fn (rs ResultSet) paginate(page int, page_size int) PageResult {
+	mut p := page
+	if p < 1 {
+		p = 1
+	}
+	mut ps := page_size
+	if ps < 1 {
+		ps = 10
+	}
+	total_rows := rs.rows.len
+	mut total_pages := (total_rows + ps - 1) / ps
+	if total_pages < 1 {
+		total_pages = 1
+	}
+	offset := (p - 1) * ps
+
+	mut page_rows := []Row{}
+	for mut i := offset; i < total_rows && i < (offset + ps); i += 1 {
+		r := rs.rows[i]
+		page_rows.push(r.copy_row())
+	}
+
+	return PageResult{
+		columns:     rs.columns.clone(),
+		rows:        page_rows,
+		page:        p,
+		page_size:   ps,
+		total_rows:  total_rows,
+		total_pages: total_pages,
+		offset:      offset,
+		has_prev:    p > 1,
+		has_next:    p < total_pages,
+	}
+}
+
+// ============================================================================
+// 5. RESULT SET RETRIEVAL, FILTERING & EXPORT (ASCII TABLE, CSV, JSON)
+// ============================================================================
+
+// column_values extracts all values for a given column name across every row in the ResultSet.
+pub fn (rs ResultSet) column_values(col_name string) []string {
+	mut out := []string{}
+	for mut i := 0; i < rs.rows.len; i += 1 {
+		r := rs.rows[i]
+		out.push(r.get(col_name))
+	}
+	return out
+}
+
+// filter_eq returns a new ResultSet containing only rows where `col_name` equals `expected`.
+pub fn (rs ResultSet) filter_eq(col_name string, expected string) ResultSet {
+	mut matched := []Row{}
+	for mut i := 0; i < rs.rows.len; i += 1 {
+		r := rs.rows[i]
+		val := r.get(col_name)
+		if val == expected {
+			matched.push(r.copy_row())
+		}
+	}
+	return ResultSet{
+		columns:     rs.columns.clone(),
+		column_meta: rs.column_meta.clone(),
+		rows:        matched,
+	}
+}
+
+// pad_right pads `s` with spaces up to `width`.
+fn pad_right(s string, width int) string {
+	if s.len >= width {
+		return s.clone()
+	}
+	pad := " ".repeat(width - s.len)
+	return "${s}${pad}"
+}
+
+// to_ascii_table renders the ResultSet as a formatted ASCII box table.
+pub fn (rs ResultSet) to_ascii_table() string {
+	if rs.columns.len == 0 {
+		return "(empty result set)"
+	}
+
+	// 1. Compute max width per column
+	mut widths := []int{}
+	for mut c := 0; c < rs.columns.len; c += 1 {
+		col_hdr := rs.columns[c]
+		mut max_w := col_hdr.len
+		for mut r_idx := 0; r_idx < rs.rows.len; r_idx += 1 {
+			row := rs.rows[r_idx]
+			mut cell := "NULL"
+			if !row.is_null_at(c) {
+				cell = row.get_at(c)
+			}
+			if cell.len > max_w {
+				max_w = cell.len
+			}
+		}
+		widths.push(max_w)
+	}
+
+	// 2. Build horizontal border line (+----+----+)
+	mut border := "+"
+	for mut c := 0; c < widths.len; c += 1 {
+		dashes := "-".repeat(widths[c] + 2)
+		border = "${border}${dashes}+"
+	}
+
+	// 3. Build header line
+	mut header := "|"
+	for mut c := 0; c < rs.columns.len; c += 1 {
+		col_hdr := rs.columns[c]
+		padded := pad_right(col_hdr, widths[c])
+		header = "${header} ${padded} |"
+	}
+
+	mut out := "${border}\n${header}\n${border}"
+
+	// 4. Build data rows
+	for mut r_idx := 0; r_idx < rs.rows.len; r_idx += 1 {
+		row := rs.rows[r_idx]
+		mut line := "|"
+		for mut c := 0; c < rs.columns.len; c += 1 {
+			mut cell := "NULL"
+			if !row.is_null_at(c) {
+				cell = row.get_at(c)
+			}
+			padded := pad_right(cell, widths[c])
+			line = "${line} ${padded} |"
+		}
+		out = "${out}\n${line}"
+	}
+
+	out = "${out}\n${border}"
+	return out
+}
+
+// to_csv exports the ResultSet to RFC-4180 CSV format.
+pub fn (rs ResultSet) to_csv() string {
+	mut out := ""
+	for mut c := 0; c < rs.columns.len; c += 1 {
+		col_name := rs.columns[c]
+		if c == 0 {
+			out = col_name.clone()
+		} else {
+			out = "${out},${col_name}"
+		}
+	}
+
+	for mut r_idx := 0; r_idx < rs.rows.len; r_idx += 1 {
+		row := rs.rows[r_idx]
+		mut line := ""
+		for mut c := 0; c < rs.columns.len; c += 1 {
+			mut cell := ""
+			if !row.is_null_at(c) {
+				raw := row.get_at(c)
+				if raw.contains(",") || raw.contains("\"") || raw.contains("\n") {
+					esc := raw.replace("\"", "\"\"")
+					cell = "\"${esc}\""
+				} else {
+					cell = raw.clone()
+				}
+			}
+			if c == 0 {
+				line = cell.clone()
+			} else {
+				line = "${line},${cell}"
+			}
+		}
+		out = "${out}\n${line}"
+	}
+	return out
+}
+
+// to_json exports the ResultSet as a JSON array of objects, preserving SQL NULLs as JSON `null`.
+pub fn (rs ResultSet) to_json() string {
+	if rs.rows.len == 0 {
+		return "[]"
+	}
+	mut out := "["
+	for mut r_idx := 0; r_idx < rs.rows.len; r_idx += 1 {
+		row := rs.rows[r_idx]
+		mut obj := "{"
+		for mut c := 0; c < rs.columns.len; c += 1 {
+			col_name := rs.columns[c]
+			mut kv := ""
+			if row.is_null_at(c) {
+				kv = "\"${col_name}\":null"
+			} else {
+				raw := row.get_at(c)
+				esc := raw.replace("\"", "\\\"")
+				kv = "\"${col_name}\":\"${esc}\""
+			}
+			if c == 0 {
+				obj = "${obj}${kv}"
+			} else {
+				obj = "${obj},${kv}"
+			}
+		}
+		obj = "${obj}}"
+		if r_idx == 0 {
+			out = "${out}${obj}"
+		} else {
+			out = "${out},${obj}"
+		}
+	}
+	out = "${out}]"
+	return out
+}

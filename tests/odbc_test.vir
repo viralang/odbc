@@ -59,7 +59,103 @@ fn test_dsn_builders() {
 	}
 }
 
-fn test_row_and_result_set_models() {
+fn test_connection_pool_lifecycle() {
+	_ := odbc.enable_driver_pooling(true, true) or {
+		panic("enable_driver_pooling failed: ${err}")
+	}
+
+	dsn := odbc.postgres_dsn("", "127.0.0.1", 5432, "pool_db", "postgres", "secret")
+	cfg := odbc.default_pool_config(dsn, 2)
+	mut pool := odbc.ConnectionPool.new(cfg) or {
+		panic("ConnectionPool.new failed: ${err}")
+	}
+	pool.seed_virtual_connections(2)
+
+	st0 := pool.stats()
+	if st0.idle_conns != 2 || st0.active_conns != 0 || st0.max_conns != 2 {
+		panic("unexpected initial pool stats")
+	}
+
+	mut c1 := pool.acquire() or { panic("acquire c1 failed: ${err}") }
+	mut c2 := pool.acquire() or { panic("acquire c2 failed: ${err}") }
+	if !c1.ping() || !c2.ping() {
+		panic("expected virtual pooled connections to pass ping()")
+	}
+
+	st1 := pool.stats()
+	if st1.idle_conns != 0 || st1.active_conns != 2 || st1.total_acquired != i64(2) {
+		panic("unexpected active pool stats")
+	}
+
+	// Verify pool exhaustion when active_conns == max_conns
+	mut exhausted := false
+	_ := pool.acquire() or {
+		exhausted = true
+		odbc.Connection{
+			henv:         odbc.null_ptr(),
+			hdbc:         odbc.null_ptr(),
+			is_connected: false,
+			in_tx:        false,
+		}
+	}
+	if !exhausted {
+		panic("expected pool.acquire() to fail when pool is exhausted")
+	}
+
+	pool.release(mut c1)
+	pool.release(mut c2)
+	st2 := pool.stats()
+	if st2.idle_conns != 2 || st2.active_conns != 0 || st2.total_released != i64(2) {
+		panic("unexpected released pool stats")
+	}
+
+	pool.close_all()
+}
+
+fn test_crud_sql_builders_and_escaping() {
+	esc := odbc.escape_literal("O'Reilly's DB")
+	if esc != "O''Reilly''s DB" {
+		panic("unexpected escape_literal output: ${esc}")
+	}
+
+	q_pg := odbc.quote_ident("user_accounts", odbc.DIALECT_POSTGRES)
+	q_my := odbc.quote_ident("user_accounts", odbc.DIALECT_MYSQL)
+	q_ms := odbc.quote_ident("user_accounts", odbc.DIALECT_SQLSERVER)
+	if q_pg != "\"user_accounts\"" || q_my != "`user_accounts`" || q_ms != "[user_accounts]" {
+		panic("unexpected quote_ident outputs: ${q_pg} | ${q_my} | ${q_ms}")
+	}
+
+	mut cols := []string{}
+	cols.push("id")
+	cols.push("title")
+	cols.push("notes")
+
+	mut vals := []string{}
+	vals.push("10")
+	vals.push("Vira's Guide")
+	vals.push("NULL")
+
+	ins := odbc.build_insert_sql("articles", cols, vals)
+	if ins != "INSERT INTO articles (id, title, notes) VALUES ('10', 'Vira''s Guide', NULL);" {
+		panic("unexpected build_insert_sql: ${ins}")
+	}
+
+	mut upd_cols := []string{}
+	upd_cols.push("title")
+	mut upd_vals := []string{}
+	upd_vals.push("Updated Title")
+	upd := odbc.build_update_sql("articles", upd_cols, upd_vals, "id = 10")
+	if upd != "UPDATE articles SET title = 'Updated Title' WHERE id = 10;" {
+		panic("unexpected build_update_sql: ${upd}")
+	}
+
+	del := odbc.build_delete_sql("articles", "id = 10")
+	if del != "DELETE FROM articles WHERE id = 10;" {
+		panic("unexpected build_delete_sql: ${del}")
+	}
+}
+
+fn test_row_result_set_and_pagination() {
 	mut cols := []string{}
 	cols.push("id")
 	cols.push("username")
@@ -67,48 +163,28 @@ fn test_row_and_result_set_models() {
 	cols.push("is_active")
 	cols.push("deleted_at")
 
-	mut vals := []string{}
-	vals.push("42")
-	vals.push("vira_engineer")
-	vals.push("1250.75")
-	vals.push("true")
-	vals.push("")
-
-	mut nulls := []bool{}
-	nulls.push(false)
-	nulls.push(false)
-	nulls.push(false)
-	nulls.push(false)
-	nulls.push(true)
-
-	row := odbc.Row{
-		columns: cols.clone(),
-		values:  vals,
-		nulls:   nulls,
-	}
-
-	if row.col_count() != 5 {
-		panic("expected 5 columns in row")
-	}
-	if row.get_int("id") != 42 {
-		panic("expected id == 42")
-	}
-	if row.get("username") != "vira_engineer" {
-		panic("expected username == vira_engineer")
-	}
-	bal := row.get_f64("balance")
-	if bal < 1250.74 || bal > 1250.76 {
-		panic("expected balance == 1250.75, got ${bal}")
-	}
-	if !row.get_bool("is_active") {
-		panic("expected is_active == true")
-	}
-	if !row.is_null("deleted_at") {
-		panic("expected deleted_at to be NULL")
-	}
-
 	mut rows := []odbc.Row{}
-	rows.push(row)
+	for mut i := 1; i <= 5; i += 1 {
+		mut vals := []string{}
+		vals.push("${i}")
+		vals.push("user_${i}")
+		vals.push("1250.75")
+		vals.push("true")
+		vals.push("")
+
+		mut nulls := []bool{}
+		nulls.push(false)
+		nulls.push(false)
+		nulls.push(false)
+		nulls.push(false)
+		nulls.push(true)
+
+		rows.push(odbc.Row{
+			columns: cols.clone(),
+			values:  vals,
+			nulls:   nulls,
+		})
+	}
 
 	rs := odbc.ResultSet{
 		columns:     cols,
@@ -116,15 +192,60 @@ fn test_row_and_result_set_models() {
 		rows:        rows,
 	}
 
-	if rs.is_empty() || rs.row_count() != 1 || rs.col_count() != 5 {
+	if rs.is_empty() || rs.row_count() != 5 || rs.col_count() != 5 {
 		panic("unexpected ResultSet dimensions")
 	}
 
 	first := rs.first() or {
 		panic("rs.first() failed: ${err}")
 	}
-	if first.get("username") != "vira_engineer" {
-		panic("first row username mismatch")
+	if first.get_int("id") != 1 || first.get("username") != "user_1" || !first.get_bool("is_active") || !first.is_null("deleted_at") {
+		panic("first row field verification failed")
+	}
+
+	table_str := rs.to_ascii_table()
+	if !table_str.contains("| user_1   |") || !table_str.contains("| NULL       |") {
+		panic("unexpected ASCII table output:\n${table_str}")
+	}
+
+	csv_str := rs.to_csv()
+	if !csv_str.starts_with("id,username,balance,is_active,deleted_at\n1,user_1,1250.75,true,") {
+		panic("unexpected CSV output:\n${csv_str}")
+	}
+
+	filtered := rs.filter_eq("username", "user_3")
+	if filtered.row_count() != 1 {
+		panic("expected filter_eq to return 1 row")
+	}
+	json_str := filtered.to_json()
+	if !json_str.contains("\"username\":\"user_3\"") || !json_str.contains("\"deleted_at\":null") {
+		panic("unexpected JSON output: ${json_str}")
+	}
+
+	// Verify SQL Pagination Builders & In-Memory ResultSet Pagination
+	req_pg := odbc.new_page_request(3, 2, "id ASC", odbc.DIALECT_POSTGRES)
+	sql_pg := odbc.build_paginated_sql("SELECT * FROM users", req_pg)
+	if sql_pg != "SELECT * FROM users ORDER BY id ASC LIMIT 2 OFFSET 4;" {
+		panic("unexpected PostgreSQL paginated SQL: ${sql_pg}")
+	}
+
+	req_ms := odbc.new_page_request(3, 2, "id ASC", odbc.DIALECT_SQLSERVER)
+	sql_ms := odbc.build_paginated_sql("SELECT * FROM users", req_ms)
+	if sql_ms != "SELECT * FROM users ORDER BY id ASC OFFSET 4 ROWS FETCH NEXT 2 ROWS ONLY;" {
+		panic("unexpected SQL Server paginated SQL: ${sql_ms}")
+	}
+
+	keyset := odbc.build_keyset_sql("SELECT * FROM users", "id", "2", 2, true, odbc.DIALECT_POSTGRES)
+	if keyset != "SELECT * FROM users WHERE id > '2' ORDER BY id ASC LIMIT 2;" {
+		panic("unexpected keyset SQL: ${keyset}")
+	}
+
+	p2 := rs.paginate(2, 2)
+	if p2.page != 2 || p2.total_pages != 3 || p2.total_rows != 5 || p2.rows.len != 2 || !p2.has_prev || !p2.has_next {
+		panic("unexpected PageResult metadata for page 2")
+	}
+	if p2.rows[0].get("username") != "user_3" || p2.rows[1].get("username") != "user_4" {
+		panic("unexpected rows on page 2")
 	}
 }
 

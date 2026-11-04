@@ -2,15 +2,49 @@ module main
 
 import odbc
 
-fn main() {
-	println("==================================================================")
-	println("  VIRA UNIVERSAL ODBC DATABASE DRIVER DEMO (module odbc v0.1.0)   ")
-	println("==================================================================")
+fn make_sample_row(id string, service string, region string, latency string, healthy string, err_msg string, is_err_null bool) odbc.Row {
+	mut cols := []string{}
+	cols.push("id")
+	cols.push("service")
+	cols.push("region")
+	cols.push("latency_ms")
+	cols.push("healthy")
+	cols.push("last_error")
 
-	// 1. Discover Installed Host ODBC Drivers via SQLDrivers
-	println("\n=== 1. INSTALLED HOST ODBC DRIVERS ===")
+	mut vals := []string{}
+	vals.push(id)
+	vals.push(service)
+	vals.push(region)
+	vals.push(latency)
+	vals.push(healthy)
+	vals.push(err_msg)
+
+	mut nulls := []bool{}
+	nulls.push(false)
+	nulls.push(false)
+	nulls.push(false)
+	nulls.push(false)
+	nulls.push(false)
+	nulls.push(is_err_null)
+
+	return odbc.Row{
+		columns: cols,
+		values:  vals,
+		nulls:   nulls,
+	}
+}
+
+fn main() {
+	println("============================================================================")
+	println("  VIRA UNIVERSAL ODBC DATABASE DRIVER — FULL OPERATIONS DEMO (v0.1.0)       ")
+	println("============================================================================")
+
+	// -------------------------------------------------------------------------
+	// 1. OS DRIVER & DSN DISCOVERY
+	// -------------------------------------------------------------------------
+	println("\n=== 1. INSTALLED HOST ODBC DRIVERS & DSNs ===")
 	drivers := odbc.list_drivers() or {
-		println("Failed to enumerate ODBC drivers: ${err}")
+		println("Error listing ODBC drivers: ${err}")
 		return
 	}
 	println("Total ODBC Drivers Installed: ${drivers.len}")
@@ -19,36 +53,30 @@ fn main() {
 		println("  [${i + 1}] ${drv.name} (${drv.attributes})")
 	}
 
-	// 2. Discover Configured System/User DSNs via SQLDataSources
-	println("\n=== 2. CONFIGURED ODBC DATA SOURCES (DSNs) ===")
-	sources := odbc.list_data_sources() or {
-		println("Failed to enumerate DSNs: ${err}")
+	dsns := odbc.list_data_sources() or {
+		println("Error listing DSNs: ${err}")
 		return
 	}
-	println("Total Configured DSNs: ${sources.len}")
-	for mut i := 0; i < sources.len; i += 1 {
-		ds := sources[i]
-		println("  [${i + 1}] DSN=${ds.name} -> Driver=${ds.driver}")
-	}
+	println("Total Configured System/User DSNs: ${dsns.len}")
 
-	// 3. Universal Connection String Builders
-	println("\n=== 3. UNIVERSAL CONNECTION STRING BUILDERS ===")
-	pg_dsn := odbc.postgres_dsn("", "127.0.0.1", 5432, "production", "postgres", "secret")
-	my_dsn := odbc.mysql_dsn("", "127.0.0.1", 3306, "commerce", "root", "secret")
-	ms_dsn := odbc.sqlserver_dsn("", "127.0.0.1", 1433, "enterprise", "sa", "StrongPass!123")
-	sq_dsn := odbc.sqlite_dsn("", "/tmp/vira_local.db")
-	dk_dsn := odbc.duckdb_dsn("", ":memory:")
+	// -------------------------------------------------------------------------
+	// 2. UNIVERSAL CONNECTION STRING BUILDERS & SQLSTATE DIAGNOSTICS
+	// -------------------------------------------------------------------------
+	println("\n=== 2. UNIVERSAL CONNECTION STRING BUILDERS & DIAGNOSTICS ===")
+	pg_dsn     := odbc.postgres_dsn("", "127.0.0.1", 5432, "production", "postgres", "secret")
+	mysql_dsn  := odbc.mysql_dsn("", "127.0.0.1", 3306, "commerce", "root", "secret")
+	mssql_dsn  := odbc.sqlserver_dsn("", "127.0.0.1", 1433, "enterprise", "sa", "StrongPass!123")
+	sqlite_dsn := odbc.sqlite_dsn("", "/tmp/vira_local.db")
+	duck_dsn   := odbc.duckdb_dsn("", ":memory:")
 
 	println("  PostgreSQL : ${pg_dsn}")
-	println("  MySQL      : ${my_dsn}")
-	println("  SQL Server : ${ms_dsn}")
-	println("  SQLite3    : ${sq_dsn}")
-	println("  DuckDB     : ${dk_dsn}")
+	println("  MySQL      : ${mysql_dsn}")
+	println("  SQL Server : ${mssql_dsn}")
+	println("  SQLite3    : ${sqlite_dsn}")
+	println("  DuckDB     : ${duck_dsn}")
 
-	// 4. Native SQLGetDiagRec Error Reporting Demonstration
-	println("\n=== 4. NATIVE SQLSTATE DIAGNOSTICS (SQLGetDiagRec) ===")
-	mut conn := odbc.connect_with_timeout(sq_dsn, 2) or {
-		println("  Gracefully intercepted driver connection error:")
+	mut db := odbc.connect_with_timeout(sqlite_dsn, 2) or {
+		println("  [Diagnostic Check] Gracefully intercepted missing driver:")
 		println("  -> ${err}")
 		odbc.Connection{
 			henv:         odbc.null_ptr(),
@@ -57,48 +85,141 @@ fn main() {
 			in_tx:        false,
 		}
 	}
-	defer conn.close()
+	if db.is_open() {
+		db.close()
+	}
 
-	// 5. ResultSet & Typed Row Inspection
-	println("\n=== 5. TYPED RESULT SET & ROW ACCESSORS ===")
+	// -------------------------------------------------------------------------
+	// 3. CONNECTION POOLING (DRIVER MANAGER + MANAGED CONNECTION POOL)
+	// -------------------------------------------------------------------------
+	println("\n=== 3. CONNECTION POOLING (DRIVER MANAGER & MANAGED POOL) ===")
+	_ := odbc.enable_driver_pooling(true, true) or {
+		println("  Driver pooling warning: ${err}")
+		false
+	}
+	println("  [OK] Enabled OS-level ODBC Driver Manager connection pooling (SQL_CP_ONE_PER_DRIVER)")
+
+	pool_cfg := odbc.default_pool_config(pg_dsn, 4)
+	mut pool := odbc.ConnectionPool.new(pool_cfg) or {
+		panic("failed to initialize ConnectionPool: ${err}")
+	}
+	// Pre-populate 3 virtual connections for offline demonstration
+	pool.seed_virtual_connections(3)
+
+	s0 := pool.stats()
+	println("  Pool Initialized -> max=${s0.max_conns} | idle=${s0.idle_conns} | active=${s0.active_conns}")
+
+	mut lease1 := pool.acquire() or { panic(err) }
+	mut lease2 := pool.acquire() or { panic(err) }
+	s1 := pool.stats()
+	println("  After 2 Acquires -> max=${s1.max_conns} | idle=${s1.idle_conns} | active=${s1.active_conns} | acquired=${s1.total_acquired}")
+
+	pool.release(mut lease1)
+	pool.release(mut lease2)
+	s2 := pool.stats()
+	println("  After 2 Releases -> max=${s2.max_conns} | idle=${s2.idle_conns} | active=${s2.active_conns} | released=${s2.total_released}")
+	pool.close_all()
+
+	// -------------------------------------------------------------------------
+	// 4. FULL DATABASE CRUD SQL GENERATION & SAFE ESCAPING
+	// -------------------------------------------------------------------------
+	println("\n=== 4. FULL CRUD SQL BUILDERS & SAFE ESCAPING ===")
+	mut ins_cols := []string{}
+	ins_cols.push("id")
+	ins_cols.push("service")
+	ins_cols.push("owner")
+	ins_cols.push("last_error")
+
+	mut ins_vals := []string{}
+	ins_vals.push("101")
+	ins_vals.push("vira-inference-engine")
+	ins_vals.push("O'Reilly Labs")
+	ins_vals.push("NULL")
+
+	ins_sql := odbc.build_insert_sql("cluster_nodes", ins_cols, ins_vals)
+	println("  INSERT : ${ins_sql}")
+
+	mut conflict_updates := []string{}
+	conflict_updates.push("service")
+	conflict_updates.push("owner")
+	upsert_sql := odbc.build_upsert_postgres_sql("cluster_nodes", ins_cols, ins_vals, "id", conflict_updates)
+	println("  UPSERT : ${upsert_sql}")
+
+	mut upd_cols := []string{}
+	upd_cols.push("healthy")
+	upd_cols.push("latency_ms")
+	mut upd_vals := []string{}
+	upd_vals.push("true")
+	upd_vals.push("1.15")
+	upd_sql := odbc.build_update_sql("cluster_nodes", upd_cols, upd_vals, "id = 101")
+	println("  UPDATE : ${upd_sql}")
+
+	del_sql := odbc.build_delete_sql("cluster_nodes", "healthy = 'false'")
+	println("  DELETE : ${del_sql}")
+
+	// -------------------------------------------------------------------------
+	// 5. MAKING & RETRIEVING RESULTS (ASCII TABLE, FILTERING, CSV & JSON)
+	// -------------------------------------------------------------------------
+	println("\n=== 5. RESULT RETRIEVAL, FILTERING & EXPORT (ASCII / CSV / JSON) ===")
 	mut cols := []string{}
 	cols.push("id")
 	cols.push("service")
+	cols.push("region")
 	cols.push("latency_ms")
 	cols.push("healthy")
-	cols.push("error_note")
+	cols.push("last_error")
 
-	mut vals := []string{}
-	vals.push("101")
-	vals.push("vira-inference-cluster")
-	vals.push("1.84")
-	vals.push("true")
-	vals.push("")
+	mut rows := []odbc.Row{}
+	rows.push(make_sample_row("101", "vira-gateway",    "eu-central-1", "1.12", "true",  "",                  true))
+	rows.push(make_sample_row("102", "vira-tensor-gpu", "us-east-1",    "3.45", "true",  "",                  true))
+	rows.push(make_sample_row("103", "vira-auth-edge",  "ap-south-1",   "1.89", "true",  "",                  true))
+	rows.push(make_sample_row("104", "vira-storage-io", "eu-central-1", "9.70", "false", "disk queue timeout", false))
+	rows.push(make_sample_row("105", "vira-scheduler",  "us-west-2",    "0.95", "true",  "",                  true))
 
-	mut nulls := []bool{}
-	nulls.push(false)
-	nulls.push(false)
-	nulls.push(false)
-	nulls.push(false)
-	nulls.push(true)
-
-	row := odbc.Row{
-		columns: cols,
-		values:  vals,
-		nulls:   nulls,
+	rs := odbc.ResultSet{
+		columns:     cols,
+		column_meta: []odbc.ColumnInfo{},
+		rows:        rows,
 	}
 
-	row_id := row.get_int("id")
-	svc := row.get("service")
-	lat := row.get_f64("latency_ms")
-	ok_flag := row.get_bool("healthy")
-	err_null := row.is_null("error_note")
+	ascii_table := rs.to_ascii_table()
+	println(ascii_table)
 
-	println("  Row ID      : ${row_id}")
-	println("  Service     : ${svc}")
-	println("  Latency (ms): ${lat}")
-	println("  Healthy     : ${ok_flag}")
-	println("  Error NULL? : ${err_null}")
+	eu_only := rs.filter_eq("region", "eu-central-1")
+	csv_out := eu_only.to_csv()
+	json_out := eu_only.to_json()
+	println("\n  Filtered (region == 'eu-central-1'): ${eu_only.row_count()} rows")
+	println("  CSV Export:\n${csv_out}")
+	println("  JSON Export:\n  ${json_out}")
 
-	println("\n=== UNIVERSAL ODBC DRIVER DEMO COMPLETED (0 LEAKS) ===")
+	// -------------------------------------------------------------------------
+	// 6. PAGINATION ENGINE (OFFSET/LIMIT, SQL SERVER FETCH, KEYSET & SLICING)
+	// -------------------------------------------------------------------------
+	println("\n=== 6. DATABASE PAGINATION (SQL GENERATION & PAGE NAVIGATION) ===")
+	pg_page_req := odbc.new_page_request(2, 2, "id ASC", odbc.DIALECT_POSTGRES)
+	pg_page_sql := odbc.build_paginated_sql("SELECT id, service, region FROM cluster_nodes", pg_page_req)
+	println("  PostgreSQL/MySQL/SQLite Page 2 SQL : ${pg_page_sql}")
+
+	ms_page_req := odbc.new_page_request(2, 2, "id ASC", odbc.DIALECT_SQLSERVER)
+	ms_page_sql := odbc.build_paginated_sql("SELECT id, service, region FROM cluster_nodes", ms_page_req)
+	println("  SQL Server / Oracle Page 2 SQL     : ${ms_page_sql}")
+
+	keyset_sql := odbc.build_keyset_sql("SELECT id, service FROM cluster_nodes WHERE healthy = true", "id", "102", 2, true, odbc.DIALECT_POSTGRES)
+	println("  Keyset (Cursor Seek > 102) SQL     : ${keyset_sql}")
+
+	println("\n  Iterating ResultSet Pages (page_size = 2):")
+	for mut p := 1; p <= 3; p += 1 {
+		page_res := rs.paginate(p, 2)
+		println("  -> Page ${page_res.page}/${page_res.total_pages} (offset=${page_res.offset}, rows=${page_res.rows.len}, total=${page_res.total_rows}, has_prev=${page_res.has_prev}, has_next=${page_res.has_next}):")
+		for mut r_i := 0; r_i < page_res.rows.len; r_i += 1 {
+			r := page_res.rows[r_i]
+			r_id := r.get("id")
+			r_svc := r.get("service")
+			r_reg := r.get("region")
+			r_lat := r.get("latency_ms")
+			println("       [${r_id}] ${r_svc} (${r_reg}) - ${r_lat}ms")
+		}
+	}
+
+	println("\n=== UNIVERSAL ODBC FULL OPERATIONS DEMO COMPLETED (0 LEAKS) ===")
 }

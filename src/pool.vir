@@ -1,0 +1,303 @@
+module odbc
+
+// ============================================================================
+// 1. PROCESS-WIDE ODBC DRIVER MANAGER CONNECTION POOLING
+// ============================================================================
+
+// enable_driver_pooling enables native connection pooling inside the OS ODBC Driver Manager
+// (unixODBC on Linux/macOS, odbc32 on Windows). Must be called before allocating Env/Connection handles.
+// - per_driver: true = SQL_CP_ONE_PER_DRIVER, false = SQL_CP_ONE_PER_HENV
+// - relaxed_match: true = SQL_CP_RELAXED_MATCH, false = SQL_CP_STRICT_MATCH
+pub fn enable_driver_pooling(per_driver bool, relaxed_match bool) !bool {
+	mut mode := SQL_CP_ONE_PER_HENV
+	if per_driver {
+		mode = SQL_CP_ONE_PER_DRIVER
+	}
+	mut match_mode := SQL_CP_STRICT_MATCH
+	if relaxed_match {
+		match_mode = SQL_CP_RELAXED_MATCH
+	}
+	unsafe {
+		rc_pool := SQLSetEnvAttr(null_ptr(), SQL_ATTR_CONNECTION_POOLING, mode, 0)
+		if !is_succeeded(int(rc_pool)) {
+			return error("failed to enable ODBC Driver Manager connection pooling (SQL_ATTR_CONNECTION_POOLING)")
+		}
+		_ := SQLSetEnvAttr(null_ptr(), SQL_ATTR_CP_MATCH, match_mode, 0)
+	}
+	return true
+}
+
+// disable_driver_pooling turns off OS-level ODBC Driver Manager connection pooling.
+pub fn disable_driver_pooling() !bool {
+	unsafe {
+		rc := SQLSetEnvAttr(null_ptr(), SQL_ATTR_CONNECTION_POOLING, SQL_CP_OFF, 0)
+		if !is_succeeded(int(rc)) {
+			return error("failed to disable ODBC Driver Manager connection pooling")
+		}
+	}
+	return true
+}
+
+// ============================================================================
+// 2. APPLICATION-LEVEL MANAGED CONNECTION POOL
+// ============================================================================
+
+// PoolConfig defines the sizing, timeout, and health-check policies for a ConnectionPool.
+pub struct PoolConfig {
+pub mut:
+	conn_str            string
+	min_conns           int
+	max_conns           int
+	login_timeout_sec   int
+	validate_on_acquire bool
+}
+
+// default_pool_config returns a production-ready PoolConfig for a connection string.
+pub fn default_pool_config(conn_str string, max_conns int) PoolConfig {
+	mut cap_max := max_conns
+	if cap_max <= 0 {
+		cap_max = 10
+	}
+	return PoolConfig{
+		conn_str:            conn_str.clone(),
+		min_conns:           0,
+		max_conns:           cap_max,
+		login_timeout_sec:   5,
+		validate_on_acquire: true,
+	}
+}
+
+// PoolStats provides a real-time telemetry snapshot of a ConnectionPool.
+pub struct PoolStats {
+pub mut:
+	max_conns            int
+	idle_conns           int
+	active_conns         int
+	total_created        i64
+	total_acquired       i64
+	total_released       i64
+	health_checks_failed i64
+}
+
+// ConnectionPool manages a bounded pool of reusable ODBC Connection handles with
+// automatic health validation (`SELECT 1`), transaction state reset on release, and telemetry.
+pub struct ConnectionPool {
+pub mut:
+	conn_str             string
+	min_conns            int
+	max_conns            int
+	login_timeout_sec    int
+	validate_on_acquire  bool
+	slots                []Connection
+	slot_busy            []bool
+	idle_conns           int
+	active_conns         int
+	total_created        i64
+	total_acquired       i64
+	total_released       i64
+	health_checks_failed i64
+	is_closed            bool
+}
+
+// ConnectionPool.new creates a new ConnectionPool and optionally pre-warms `config.min_conns` connections.
+pub fn ConnectionPool.new(config PoolConfig) !ConnectionPool {
+	if config.max_conns <= 0 {
+		return error("PoolConfig.max_conns must be greater than 0")
+	}
+	if config.min_conns < 0 || config.min_conns > config.max_conns {
+		return error("PoolConfig.min_conns must be between 0 and max_conns")
+	}
+
+	mut pool := ConnectionPool{
+		conn_str:             config.conn_str.clone(),
+		min_conns:            config.min_conns,
+		max_conns:            config.max_conns,
+		login_timeout_sec:    config.login_timeout_sec,
+		validate_on_acquire:  config.validate_on_acquire,
+		slots:                []Connection{},
+		slot_busy:            []bool{},
+		idle_conns:           0,
+		active_conns:         0,
+		total_created:        i64(0),
+		total_acquired:       i64(0),
+		total_released:       i64(0),
+		health_checks_failed: i64(0),
+		is_closed:            false,
+	}
+
+	if config.min_conns > 0 {
+		pool.warmup(config.min_conns) or {
+			pool.close_all()
+			return error("ConnectionPool warmup failed: ${err}")
+		}
+	}
+
+	return pool
+}
+
+// warmup pre-establishes up to `target_idle` idle connections in the pool.
+pub fn (mut p ConnectionPool) warmup(target_idle int) !int {
+	if p.is_closed {
+		return error("cannot warm up a closed ConnectionPool")
+	}
+	mut created := 0
+	for p.idle_conns < target_idle && (p.idle_conns + p.active_conns) < p.max_conns {
+		conn := connect_with_timeout(p.conn_str, p.login_timeout_sec)!
+		p.slots.push(conn)
+		p.slot_busy.push(false)
+		p.idle_conns += 1
+		p.total_created += i64(1)
+		created += 1
+	}
+	return created
+}
+
+// acquire leases an available Connection from the pool, validating its liveness or opening
+// a new connection if under `max_conns`.
+pub fn (mut p ConnectionPool) acquire() !Connection {
+	if p.is_closed {
+		return error("cannot acquire connection from a closed ConnectionPool")
+	}
+
+	// 1. Scan for an idle slot in the pool
+	for mut i := 0; i < p.slots.len; i += 1 {
+		if !p.slot_busy[i] {
+			mut candidate := p.slots[i]
+			if candidate.is_connected {
+				if p.validate_on_acquire && candidate.hdbc != null_ptr() {
+					if !candidate.ping() {
+						// Stale connection detected: close and replace it
+						p.health_checks_failed += i64(1)
+						candidate.close()
+						fresh := connect_with_timeout(p.conn_str, p.login_timeout_sec)!
+						p.total_created += i64(1)
+						p.slots.set(i, fresh)
+						p.slot_busy.set(i, true)
+						p.idle_conns -= 1
+						p.active_conns += 1
+						p.total_acquired += i64(1)
+						return fresh
+					}
+				}
+				p.slot_busy.set(i, true)
+				p.idle_conns -= 1
+				p.active_conns += 1
+				p.total_acquired += i64(1)
+				return candidate
+			}
+		}
+	}
+
+	// 2. No idle connection available; check if we can allocate a new slot
+	if p.active_conns >= p.max_conns {
+		return error("ConnectionPool exhausted (active=${p.active_conns}, max=${p.max_conns})")
+	}
+
+	fresh := connect_with_timeout(p.conn_str, p.login_timeout_sec)!
+	p.total_created += i64(1)
+	p.slots.push(fresh)
+	p.slot_busy.push(true)
+	p.active_conns += 1
+	p.total_acquired += i64(1)
+	return fresh
+}
+
+// release returns a leased Connection back to the pool, rolling back any uncommitted transaction.
+pub fn (mut p ConnectionPool) release(mut conn Connection) {
+	if p.is_closed {
+		conn.close()
+		return
+	}
+
+	// Ensure any dangling transaction is safely rolled back before returning to the idle pool
+	if conn.is_connected && conn.in_tx && conn.hdbc != null_ptr() {
+		_ := conn.rollback() or { false }
+	}
+
+	for mut i := 0; i < p.slots.len; i += 1 {
+		if p.slot_busy[i] && p.slots[i].hdbc == conn.hdbc {
+			p.slots.set(i, conn)
+			p.slot_busy.set(i, false)
+			if p.active_conns > 0 {
+				p.active_conns -= 1
+			}
+			if conn.is_connected {
+				p.idle_conns += 1
+			}
+			p.total_released += i64(1)
+			return
+		}
+	}
+
+	// Fallback if matched by first busy slot
+	for mut i := 0; i < p.slots.len; i += 1 {
+		if p.slot_busy[i] {
+			p.slots.set(i, conn)
+			p.slot_busy.set(i, false)
+			if p.active_conns > 0 {
+				p.active_conns -= 1
+			}
+			if conn.is_connected {
+				p.idle_conns += 1
+			}
+			p.total_released += i64(1)
+			return
+		}
+	}
+
+	if p.slots.len < p.max_conns && conn.is_connected {
+		p.slots.push(conn)
+		p.slot_busy.push(false)
+		p.idle_conns += 1
+		p.total_released += i64(1)
+	} else {
+		conn.close()
+	}
+}
+
+// seed_virtual_connections populates the pool with lightweight virtual connections for offline testing/demos.
+pub fn (mut p ConnectionPool) seed_virtual_connections(count int) {
+	for mut i := 0; i < count && p.slots.len < p.max_conns; i += 1 {
+		vconn := Connection{
+			henv:         null_ptr(),
+			hdbc:         null_ptr(),
+			is_connected: true,
+			in_tx:        false,
+		}
+		p.slots.push(vconn)
+		p.slot_busy.push(false)
+		p.idle_conns += 1
+		p.total_created += i64(1)
+	}
+}
+
+// stats returns a snapshot of current pool utilization and lifetime counters.
+pub fn (p ConnectionPool) stats() PoolStats {
+	return PoolStats{
+		max_conns:            p.max_conns,
+		idle_conns:           p.idle_conns,
+		active_conns:         p.active_conns,
+		total_created:        p.total_created,
+		total_acquired:       p.total_acquired,
+		total_released:       p.total_released,
+		health_checks_failed: p.health_checks_failed,
+	}
+}
+
+// close_all disconnects and frees all connections managed by the pool.
+pub fn (mut p ConnectionPool) close_all() {
+	if p.is_closed {
+		return
+	}
+	for mut i := 0; i < p.slots.len; i += 1 {
+		mut c := p.slots[i]
+		if c.is_connected && c.hdbc != null_ptr() {
+			c.close()
+		}
+		p.slots.set(i, c)
+		p.slot_busy.set(i, false)
+	}
+	p.idle_conns = 0
+	p.active_conns = 0
+	p.is_closed = true
+}

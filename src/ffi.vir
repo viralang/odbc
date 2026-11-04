@@ -34,6 +34,13 @@ pub const SQL_OV_ODBC2                = 2
 pub const SQL_OV_ODBC3                = 3
 pub const SQL_OV_ODBC3_80             = 380
 
+// Driver Manager Connection Pooling Modes
+pub const SQL_CP_OFF                  = 0
+pub const SQL_CP_ONE_PER_DRIVER       = 1
+pub const SQL_CP_ONE_PER_HENV         = 2
+pub const SQL_CP_STRICT_MATCH         = 0
+pub const SQL_CP_RELAXED_MATCH        = 1
+
 // Connection Attributes
 pub const SQL_ATTR_ASYNC_ENABLE       = 4
 pub const SQL_ATTR_AUTOCOMMIT         = 102
