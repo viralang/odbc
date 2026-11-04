@@ -1,8 +1,8 @@
-# 1. Tell GitHub Linguist to recognize .vir and vira.mod files as Vira in the repository language bar
+# 1. Tell GitHub Linguist to syntax-highlight .vir and vira.mod files and include them in the language bar
 *.vir linguist-detectable=true
-*.vir linguist-language=Vira
+*.vir linguist-language=V
 vira.mod linguist-detectable=true
-vira.mod linguist-language=Vira
+vira.mod linguist-language=V
 
 # Ensure src, examples, and tests are counted as source code (not documentation/examples)
 src/** linguist-documentation=false
