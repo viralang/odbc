@@ -1,0 +1,10 @@
+build/
+bin/
+dist/
+*.o
+*.so
+*.dll
+*.dylib
+*.exe
+.vira/
+.vir/

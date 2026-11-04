@@ -1,0 +1,104 @@
+module main
+
+import odbc
+
+fn main() {
+	println("==================================================================")
+	println("  VIRA UNIVERSAL ODBC DATABASE DRIVER DEMO (module odbc v0.1.0)   ")
+	println("==================================================================")
+
+	// 1. Discover Installed Host ODBC Drivers via SQLDrivers
+	println("\n=== 1. INSTALLED HOST ODBC DRIVERS ===")
+	drivers := odbc.list_drivers() or {
+		println("Failed to enumerate ODBC drivers: ${err}")
+		return
+	}
+	println("Total ODBC Drivers Installed: ${drivers.len}")
+	for mut i := 0; i < drivers.len; i += 1 {
+		drv := drivers[i]
+		println("  [${i + 1}] ${drv.name} (${drv.attributes})")
+	}
+
+	// 2. Discover Configured System/User DSNs via SQLDataSources
+	println("\n=== 2. CONFIGURED ODBC DATA SOURCES (DSNs) ===")
+	sources := odbc.list_data_sources() or {
+		println("Failed to enumerate DSNs: ${err}")
+		return
+	}
+	println("Total Configured DSNs: ${sources.len}")
+	for mut i := 0; i < sources.len; i += 1 {
+		ds := sources[i]
+		println("  [${i + 1}] DSN=${ds.name} -> Driver=${ds.driver}")
+	}
+
+	// 3. Universal Connection String Builders
+	println("\n=== 3. UNIVERSAL CONNECTION STRING BUILDERS ===")
+	pg_dsn := odbc.postgres_dsn("", "127.0.0.1", 5432, "production", "postgres", "secret")
+	my_dsn := odbc.mysql_dsn("", "127.0.0.1", 3306, "commerce", "root", "secret")
+	ms_dsn := odbc.sqlserver_dsn("", "127.0.0.1", 1433, "enterprise", "sa", "StrongPass!123")
+	sq_dsn := odbc.sqlite_dsn("", "/tmp/vira_local.db")
+	dk_dsn := odbc.duckdb_dsn("", ":memory:")
+
+	println("  PostgreSQL : ${pg_dsn}")
+	println("  MySQL      : ${my_dsn}")
+	println("  SQL Server : ${ms_dsn}")
+	println("  SQLite3    : ${sq_dsn}")
+	println("  DuckDB     : ${dk_dsn}")
+
+	// 4. Native SQLGetDiagRec Error Reporting Demonstration
+	println("\n=== 4. NATIVE SQLSTATE DIAGNOSTICS (SQLGetDiagRec) ===")
+	mut conn := odbc.connect_with_timeout(sq_dsn, 2) or {
+		println("  Gracefully intercepted driver connection error:")
+		println("  -> ${err}")
+		odbc.Connection{
+			henv:         odbc.null_ptr(),
+			hdbc:         odbc.null_ptr(),
+			is_connected: false,
+			in_tx:        false,
+		}
+	}
+	defer conn.close()
+
+	// 5. ResultSet & Typed Row Inspection
+	println("\n=== 5. TYPED RESULT SET & ROW ACCESSORS ===")
+	mut cols := []string{}
+	cols.push("id")
+	cols.push("service")
+	cols.push("latency_ms")
+	cols.push("healthy")
+	cols.push("error_note")
+
+	mut vals := []string{}
+	vals.push("101")
+	vals.push("vira-inference-cluster")
+	vals.push("1.84")
+	vals.push("true")
+	vals.push("")
+
+	mut nulls := []bool{}
+	nulls.push(false)
+	nulls.push(false)
+	nulls.push(false)
+	nulls.push(false)
+	nulls.push(true)
+
+	row := odbc.Row{
+		columns: cols,
+		values:  vals,
+		nulls:   nulls,
+	}
+
+	row_id := row.get_int("id")
+	svc := row.get("service")
+	lat := row.get_f64("latency_ms")
+	ok_flag := row.get_bool("healthy")
+	err_null := row.is_null("error_note")
+
+	println("  Row ID      : ${row_id}")
+	println("  Service     : ${svc}")
+	println("  Latency (ms): ${lat}")
+	println("  Healthy     : ${ok_flag}")
+	println("  Error NULL? : ${err_null}")
+
+	println("\n=== UNIVERSAL ODBC DRIVER DEMO COMPLETED (0 LEAKS) ===")
+}

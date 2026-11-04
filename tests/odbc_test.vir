@@ -1,0 +1,149 @@
+module main
+
+import odbc
+
+fn test_odbc_env_and_drivers() {
+	mut env := odbc.Env.new() or {
+		panic("Env.new() failed: ${err}")
+	}
+	if !env.is_active {
+		panic("expected env.is_active to be true")
+	}
+
+	drivers := env.list_drivers() or {
+		env.close()
+		panic("env.list_drivers() failed: ${err}")
+	}
+	println("  [odbc_test] discovered ${drivers.len} installed ODBC driver(s)")
+	for mut i := 0; i < drivers.len; i += 1 {
+		d := drivers[i]
+		println("    - Driver: ${d.name} (${d.attributes})")
+	}
+
+	sources := env.list_data_sources() or {
+		env.close()
+		panic("env.list_data_sources() failed: ${err}")
+	}
+	println("  [odbc_test] discovered ${sources.len} configured DSN(s)")
+
+	env.close()
+	if env.is_active {
+		panic("expected env.is_active to be false after close()")
+	}
+}
+
+fn test_dsn_builders() {
+	pg := odbc.postgres_dsn("", "127.0.0.1", 5432, "analytics", "postgres", "secret")
+	if !pg.contains("Driver={PostgreSQL Unicode}") || !pg.contains("Port=5432") || !pg.contains("Database=analytics") {
+		panic("invalid postgres_dsn output: ${pg}")
+	}
+
+	my := odbc.mysql_dsn("", "db.internal", 3306, "shop", "root", "pass")
+	if !my.contains("Driver={MySQL ODBC 8.0 Unicode Driver}") || !my.contains("Port=3306") {
+		panic("invalid mysql_dsn output: ${my}")
+	}
+
+	ms := odbc.sqlserver_dsn("", "sql.corp", 1433, "erp", "sa", "StrongPwd!")
+	if !ms.contains("Driver={ODBC Driver 17 for SQL Server}") || !ms.contains("Server=sql.corp,1433") {
+		panic("invalid sqlserver_dsn output: ${ms}")
+	}
+
+	sq := odbc.sqlite_dsn("", "/tmp/app.db")
+	if !sq.contains("Driver={SQLite3};Database=/tmp/app.db;") {
+		panic("invalid sqlite_dsn output: ${sq}")
+	}
+
+	dk := odbc.duckdb_dsn("", ":memory:")
+	if !dk.contains("Driver={DuckDB Driver};Database=:memory:;") {
+		panic("invalid duckdb_dsn output: ${dk}")
+	}
+}
+
+fn test_row_and_result_set_models() {
+	mut cols := []string{}
+	cols.push("id")
+	cols.push("username")
+	cols.push("balance")
+	cols.push("is_active")
+	cols.push("deleted_at")
+
+	mut vals := []string{}
+	vals.push("42")
+	vals.push("vira_engineer")
+	vals.push("1250.75")
+	vals.push("true")
+	vals.push("")
+
+	mut nulls := []bool{}
+	nulls.push(false)
+	nulls.push(false)
+	nulls.push(false)
+	nulls.push(false)
+	nulls.push(true)
+
+	row := odbc.Row{
+		columns: cols.clone(),
+		values:  vals,
+		nulls:   nulls,
+	}
+
+	if row.col_count() != 5 {
+		panic("expected 5 columns in row")
+	}
+	if row.get_int("id") != 42 {
+		panic("expected id == 42")
+	}
+	if row.get("username") != "vira_engineer" {
+		panic("expected username == vira_engineer")
+	}
+	bal := row.get_f64("balance")
+	if bal < 1250.74 || bal > 1250.76 {
+		panic("expected balance == 1250.75, got ${bal}")
+	}
+	if !row.get_bool("is_active") {
+		panic("expected is_active == true")
+	}
+	if !row.is_null("deleted_at") {
+		panic("expected deleted_at to be NULL")
+	}
+
+	mut rows := []odbc.Row{}
+	rows.push(row)
+
+	rs := odbc.ResultSet{
+		columns:     cols,
+		column_meta: []odbc.ColumnInfo{},
+		rows:        rows,
+	}
+
+	if rs.is_empty() || rs.row_count() != 1 || rs.col_count() != 5 {
+		panic("unexpected ResultSet dimensions")
+	}
+
+	first := rs.first() or {
+		panic("rs.first() failed: ${err}")
+	}
+	if first.get("username") != "vira_engineer" {
+		panic("first row username mismatch")
+	}
+}
+
+fn test_diagnostic_error_handling() {
+	mut caught_err := false
+	conn := odbc.connect_with_timeout("Driver={NonExistentViraDriver_999};Server=127.0.0.1;", 1) or {
+		println("  [odbc_test] verified SQLGetDiagRec diagnostic: ${err}")
+		if !err.contains("[SQLSTATE") {
+			panic("expected [SQLSTATE in diagnostic error, got: ${err}")
+		}
+		caught_err = true
+		odbc.Connection{
+			henv:         odbc.null_ptr(),
+			hdbc:         odbc.null_ptr(),
+			is_connected: false,
+			in_tx:        false,
+		}
+	}
+	if !caught_err || conn.is_open() {
+		panic("expected connection to non-existent driver to fail with SQLSTATE diagnostic")
+	}
+}

@@ -1,0 +1,633 @@
+module odbc
+
+// ============================================================================
+// 1. ODBC ENVIRONMENT & SYSTEM DRIVER / DSN DISCOVERY
+// ============================================================================
+
+pub struct Env {
+pub mut:
+	henv      voidptr
+	is_active bool
+}
+
+// Env.new initializes an ODBC 3.x environment handle.
+pub fn Env.new() !Env {
+	unsafe {
+		mut henv := null_ptr()
+		rc := SQLAllocHandle(SQL_HANDLE_ENV, null_ptr(), &mut henv)
+		if !is_succeeded(int(rc)) {
+			return error("failed to allocate ODBC environment handle (SQLAllocHandle)")
+		}
+
+		rc_ver := SQLSetEnvAttr(henv, SQL_ATTR_ODBC_VERSION, SQL_OV_ODBC3, 0)
+		if !is_succeeded(int(rc_ver)) {
+			diag := extract_diag_error(SQL_HANDLE_ENV, henv)
+			SQLFreeHandle(SQL_HANDLE_ENV, henv)
+			return error("failed to set ODBC v3 environment attribute: ${diag}")
+		}
+
+		return Env{
+			henv:      henv,
+			is_active: true,
+		}
+	}
+}
+
+// list_drivers enumerates all ODBC drivers registered on the host OS.
+pub fn (e Env) list_drivers() ![]DriverInfo {
+	if !e.is_active {
+		return error("ODBC environment handle is closed")
+	}
+	mut drivers := []DriverInfo{}
+	unsafe {
+		desc_buf := calloc(512, 1)
+		attr_buf := calloc(1024, 1)
+		mut desc_len := zero_short()
+		mut attr_len := zero_short()
+		mut direction := SQL_FETCH_FIRST
+
+		for {
+			rc := SQLDrivers(
+				e.henv,
+				direction,
+				desc_buf,
+				511,
+				&mut desc_len,
+				attr_buf,
+				1023,
+				&mut attr_len
+			)
+			if int(rc) == SQL_NO_DATA {
+				break
+			}
+			if !is_succeeded(int(rc)) {
+				free(desc_buf)
+				free(attr_buf)
+				diag := extract_diag_error(SQL_HANDLE_ENV, e.henv)
+				return error("SQLDrivers enumeration failed: ${diag}")
+			}
+
+			drv_name := cstr_to_string(desc_buf)
+			drv_attr := cstr_to_string(attr_buf)
+			drivers.push(DriverInfo{
+				name:       drv_name,
+				attributes: drv_attr,
+			})
+			direction = SQL_FETCH_NEXT
+		}
+
+		free(desc_buf)
+		free(attr_buf)
+	}
+	return drivers
+}
+
+// list_data_sources enumerates all user and system ODBC Data Source Names (DSNs).
+pub fn (e Env) list_data_sources() ![]DataSourceInfo {
+	if !e.is_active {
+		return error("ODBC environment handle is closed")
+	}
+	mut sources := []DataSourceInfo{}
+	unsafe {
+		dsn_buf := calloc(512, 1)
+		drv_buf := calloc(512, 1)
+		mut dsn_len := zero_short()
+		mut drv_len := zero_short()
+		mut direction := SQL_FETCH_FIRST
+
+		for {
+			rc := SQLDataSources(
+				e.henv,
+				direction,
+				dsn_buf,
+				511,
+				&mut dsn_len,
+				drv_buf,
+				511,
+				&mut drv_len
+			)
+			if int(rc) == SQL_NO_DATA {
+				break
+			}
+			if !is_succeeded(int(rc)) {
+				free(dsn_buf)
+				free(drv_buf)
+				diag := extract_diag_error(SQL_HANDLE_ENV, e.henv)
+				return error("SQLDataSources enumeration failed: ${diag}")
+			}
+
+			dsn_name := cstr_to_string(dsn_buf)
+			drv_name := cstr_to_string(drv_buf)
+			sources.push(DataSourceInfo{
+				name:   dsn_name,
+				driver: drv_name,
+			})
+			direction = SQL_FETCH_NEXT
+		}
+
+		free(dsn_buf)
+		free(drv_buf)
+	}
+	return sources
+}
+
+// close releases the underlying ODBC environment handle.
+pub fn (mut e Env) close() {
+	if e.is_active {
+		unsafe {
+			SQLFreeHandle(SQL_HANDLE_ENV, e.henv)
+		}
+		e.henv = null_ptr()
+		e.is_active = false
+	}
+}
+
+// Top-level helper to list installed ODBC drivers in a single call.
+pub fn list_drivers() ![]DriverInfo {
+	mut env := Env.new()!
+	defer env.close()
+	return env.list_drivers()!
+}
+
+// Top-level helper to list configured ODBC DSNs in a single call.
+pub fn list_data_sources() ![]DataSourceInfo {
+	mut env := Env.new()!
+	defer env.close()
+	return env.list_data_sources()!
+}
+
+// ============================================================================
+// 2. UNIVERSAL ODBC DATABASE CONNECTION
+// ============================================================================
+
+pub struct Connection {
+pub mut:
+	henv         voidptr
+	hdbc         voidptr
+	is_connected bool
+	in_tx        bool
+}
+
+// connect establishes a connection to any ODBC-compliant database using a connection string.
+pub fn connect(conn_str string) !Connection {
+	return connect_with_timeout(conn_str, 10)!
+}
+
+// connect_with_timeout establishes an ODBC connection with an explicit login/connection timeout in seconds.
+pub fn connect_with_timeout(conn_str string, timeout_sec int) !Connection {
+	unsafe {
+		mut henv := null_ptr()
+		rc_env := SQLAllocHandle(SQL_HANDLE_ENV, null_ptr(), &mut henv)
+		if !is_succeeded(int(rc_env)) {
+			return error("failed to allocate SQL_HANDLE_ENV")
+		}
+
+		rc_ver := SQLSetEnvAttr(henv, SQL_ATTR_ODBC_VERSION, SQL_OV_ODBC3, 0)
+		if !is_succeeded(int(rc_ver)) {
+			diag := extract_diag_error(SQL_HANDLE_ENV, henv)
+			SQLFreeHandle(SQL_HANDLE_ENV, henv)
+			return error("failed to set SQL_OV_ODBC3: ${diag}")
+		}
+
+		mut hdbc := null_ptr()
+		rc_dbc := SQLAllocHandle(SQL_HANDLE_DBC, henv, &mut hdbc)
+		if !is_succeeded(int(rc_dbc)) {
+			diag := extract_diag_error(SQL_HANDLE_ENV, henv)
+			SQLFreeHandle(SQL_HANDLE_ENV, henv)
+			return error("failed to allocate SQL_HANDLE_DBC: ${diag}")
+		}
+
+		if timeout_sec > 0 {
+			SQLSetConnectAttr(hdbc, SQL_ATTR_LOGIN_TIMEOUT, timeout_sec, 0)
+			SQLSetConnectAttr(hdbc, SQL_ATTR_CONNECTION_TIMEOUT, timeout_sec, 0)
+		}
+
+		out_buf := calloc(1024, 1)
+		mut out_len := zero_short()
+		rc_conn := SQLDriverConnect(
+			hdbc,
+			null_ptr(),
+			conn_str,
+			SQL_NTS,
+			out_buf,
+			1023,
+			&mut out_len,
+			SQL_DRIVER_NOPROMPT
+		)
+		free(out_buf)
+
+		if !is_succeeded(int(rc_conn)) {
+			diag := extract_diag_error(SQL_HANDLE_DBC, hdbc)
+			SQLFreeHandle(SQL_HANDLE_DBC, hdbc)
+			SQLFreeHandle(SQL_HANDLE_ENV, henv)
+			return error("SQLDriverConnect failed: ${diag}")
+		}
+
+		return Connection{
+			henv:         henv,
+			hdbc:         hdbc,
+			is_connected: true,
+			in_tx:        false,
+		}
+	}
+}
+
+// connect_dsn connects to a pre-configured ODBC Data Source Name (DSN) with credentials.
+pub fn connect_dsn(dsn string, user string, password string) !Connection {
+	unsafe {
+		mut henv := null_ptr()
+		rc_env := SQLAllocHandle(SQL_HANDLE_ENV, null_ptr(), &mut henv)
+		if !is_succeeded(int(rc_env)) {
+			return error("failed to allocate SQL_HANDLE_ENV")
+		}
+
+		rc_ver := SQLSetEnvAttr(henv, SQL_ATTR_ODBC_VERSION, SQL_OV_ODBC3, 0)
+		if !is_succeeded(int(rc_ver)) {
+			diag := extract_diag_error(SQL_HANDLE_ENV, henv)
+			SQLFreeHandle(SQL_HANDLE_ENV, henv)
+			return error("failed to set SQL_OV_ODBC3: ${diag}")
+		}
+
+		mut hdbc := null_ptr()
+		rc_dbc := SQLAllocHandle(SQL_HANDLE_DBC, henv, &mut hdbc)
+		if !is_succeeded(int(rc_dbc)) {
+			diag := extract_diag_error(SQL_HANDLE_ENV, henv)
+			SQLFreeHandle(SQL_HANDLE_ENV, henv)
+			return error("failed to allocate SQL_HANDLE_DBC: ${diag}")
+		}
+
+		rc_conn := SQLConnect(
+			hdbc,
+			dsn,
+			SQL_NTS,
+			user,
+			SQL_NTS,
+			password,
+			SQL_NTS
+		)
+
+		if !is_succeeded(int(rc_conn)) {
+			diag := extract_diag_error(SQL_HANDLE_DBC, hdbc)
+			SQLFreeHandle(SQL_HANDLE_DBC, hdbc)
+			SQLFreeHandle(SQL_HANDLE_ENV, henv)
+			return error("SQLConnect failed for DSN '${dsn}': ${diag}")
+		}
+
+		return Connection{
+			henv:         henv,
+			hdbc:         hdbc,
+			is_connected: true,
+			in_tx:        false,
+		}
+	}
+}
+
+// is_open returns true if the connection handle is currently connected.
+pub fn (c Connection) is_open() bool {
+	return c.is_connected
+}
+
+// exec executes a non-query SQL statement (DDL, INSERT, UPDATE, DELETE) and returns the affected row count.
+pub fn (c Connection) exec(sql string) !int {
+	if !c.is_connected {
+		return error("cannot execute SQL on a closed ODBC connection")
+	}
+	unsafe {
+		mut hstmt := null_ptr()
+		rc_alloc := SQLAllocHandle(SQL_HANDLE_STMT, c.hdbc, &mut hstmt)
+		if !is_succeeded(int(rc_alloc)) {
+			diag := extract_diag_error(SQL_HANDLE_DBC, c.hdbc)
+			return error("failed to allocate statement handle: ${diag}")
+		}
+
+		rc_exec := SQLExecDirect(hstmt, sql, SQL_NTS)
+		if !is_succeeded(int(rc_exec)) && int(rc_exec) != SQL_NO_DATA {
+			diag := extract_diag_error(SQL_HANDLE_STMT, hstmt)
+			SQLFreeHandle(SQL_HANDLE_STMT, hstmt)
+			return error("SQLExecDirect failed: ${diag}")
+		}
+
+		mut affected := i64(0)
+		SQLRowCount(hstmt, &mut affected)
+		SQLFreeHandle(SQL_HANDLE_STMT, hstmt)
+
+		if int(affected) < 0 {
+			return 0
+		}
+		return int(affected)
+	}
+}
+
+// fetch_stmt_result_set reads column descriptions and all rows from an executed SQLHSTMT.
+fn fetch_stmt_result_set(hstmt voidptr) !ResultSet {
+	mut cols := []string{}
+	mut meta := []ColumnInfo{}
+	mut rows := []Row{}
+
+	unsafe {
+		mut num_cols := zero_short()
+		rc_cols := SQLNumResultCols(hstmt, &mut num_cols)
+		if !is_succeeded(int(rc_cols)) {
+			diag := extract_diag_error(SQL_HANDLE_STMT, hstmt)
+			return error("SQLNumResultCols failed: ${diag}")
+		}
+
+		col_total := int(num_cols)
+		col_name_buf := calloc(256, 1)
+
+		for mut col_idx := 1; col_idx <= col_total; col_idx += 1 {
+			mut name_len := zero_short()
+			mut data_type := zero_short()
+			mut col_size := i64(0)
+			mut dec_digits := zero_short()
+			mut nullable := zero_short()
+
+			rc_desc := SQLDescribeCol(
+				hstmt,
+				col_idx,
+				col_name_buf,
+				255,
+				&mut name_len,
+				&mut data_type,
+				&mut col_size,
+				&mut dec_digits,
+				&mut nullable
+			)
+
+			mut c_name := "col_${col_idx}"
+			if is_succeeded(int(rc_desc)) {
+				c_name = cstr_to_string(col_name_buf)
+			}
+			cols.push(c_name.clone())
+			meta.push(ColumnInfo{
+				name:           c_name,
+				data_type:      int(data_type),
+				column_size:    col_size,
+				decimal_digits: int(dec_digits),
+				nullable:       int(nullable) != SQL_NO_NULLS,
+			})
+		}
+		free(col_name_buf)
+
+		cell_buf_cap := 16384
+		cell_buf := calloc(cell_buf_cap, 1)
+
+		for {
+			rc_fetch := SQLFetch(hstmt)
+			if int(rc_fetch) == SQL_NO_DATA {
+				break
+			}
+			if !is_succeeded(int(rc_fetch)) {
+				free(cell_buf)
+				diag := extract_diag_error(SQL_HANDLE_STMT, hstmt)
+				return error("SQLFetch failed: ${diag}")
+			}
+
+			mut row_cols := []string{}
+			mut row_vals := []string{}
+			mut row_nulls := []bool{}
+
+			for mut col_idx := 1; col_idx <= col_total; col_idx += 1 {
+				row_cols.push(cols[col_idx - 1].clone())
+
+				mut indicator := i64(0)
+				rc_data := SQLGetData(
+					hstmt,
+					col_idx,
+					SQL_C_CHAR,
+					cell_buf,
+					cell_buf_cap - 1,
+					&mut indicator
+				)
+
+				if !is_succeeded(int(rc_data)) {
+					free(cell_buf)
+					diag := extract_diag_error(SQL_HANDLE_STMT, hstmt)
+					return error("SQLGetData failed on column ${col_idx}: ${diag}")
+				}
+
+				if int(indicator) == SQL_NULL_DATA {
+					row_vals.push("")
+					row_nulls.push(true)
+				} else {
+					val_str := cstr_to_string(cell_buf)
+					row_vals.push(val_str)
+					row_nulls.push(false)
+				}
+			}
+
+			rows.push(Row{
+				columns: row_cols,
+				values:  row_vals,
+				nulls:   row_nulls,
+			})
+		}
+
+		free(cell_buf)
+	}
+
+	return ResultSet{
+		columns:     cols,
+		column_meta: meta,
+		rows:        rows,
+	}
+}
+
+// query executes a SELECT SQL statement and returns a materialized ResultSet.
+pub fn (c Connection) query(sql string) !ResultSet {
+	if !c.is_connected {
+		return error("cannot query on a closed ODBC connection")
+	}
+	unsafe {
+		mut hstmt := null_ptr()
+		rc_alloc := SQLAllocHandle(SQL_HANDLE_STMT, c.hdbc, &mut hstmt)
+		if !is_succeeded(int(rc_alloc)) {
+			diag := extract_diag_error(SQL_HANDLE_DBC, c.hdbc)
+			return error("failed to allocate statement handle: ${diag}")
+		}
+
+		rc_exec := SQLExecDirect(hstmt, sql, SQL_NTS)
+		if !is_succeeded(int(rc_exec)) {
+			diag := extract_diag_error(SQL_HANDLE_STMT, hstmt)
+			SQLFreeHandle(SQL_HANDLE_STMT, hstmt)
+			return error("SQLExecDirect failed: ${diag}")
+		}
+
+		rs := fetch_stmt_result_set(hstmt) or {
+			SQLFreeHandle(SQL_HANDLE_STMT, hstmt)
+			return error(err)
+		}
+		SQLFreeHandle(SQL_HANDLE_STMT, hstmt)
+		return rs
+	}
+}
+
+// query_scalar executes a SQL query and returns the string value of the first column of the first row.
+pub fn (c Connection) query_scalar(sql string) !string {
+	rs := c.query(sql)!
+	if rs.is_empty() {
+		return error("query returned 0 rows")
+	}
+	first_row := rs.first()!
+	if first_row.col_count() == 0 {
+		return error("query returned 0 columns")
+	}
+	return first_row.get_at(0)
+}
+
+// begin_tx starts a manual database transaction by disabling SQL_ATTR_AUTOCOMMIT.
+pub fn (mut c Connection) begin_tx() !bool {
+	if !c.is_connected {
+		return error("connection is closed")
+	}
+	unsafe {
+		rc := SQLSetConnectAttr(c.hdbc, SQL_ATTR_AUTOCOMMIT, SQL_AUTOCOMMIT_OFF, 0)
+		if !is_succeeded(int(rc)) {
+			diag := extract_diag_error(SQL_HANDLE_DBC, c.hdbc)
+			return error("begin_tx failed: ${diag}")
+		}
+	}
+	c.in_tx = true
+	return true
+}
+
+// commit commits the active transaction and restores SQL_ATTR_AUTOCOMMIT.
+pub fn (mut c Connection) commit() !bool {
+	if !c.is_connected {
+		return error("connection is closed")
+	}
+	unsafe {
+		rc := SQLEndTran(SQL_HANDLE_DBC, c.hdbc, SQL_COMMIT)
+		if !is_succeeded(int(rc)) {
+			diag := extract_diag_error(SQL_HANDLE_DBC, c.hdbc)
+			return error("commit failed: ${diag}")
+		}
+		SQLSetConnectAttr(c.hdbc, SQL_ATTR_AUTOCOMMIT, SQL_AUTOCOMMIT_ON, 0)
+	}
+	c.in_tx = false
+	return true
+}
+
+// rollback aborts the active transaction and restores SQL_ATTR_AUTOCOMMIT.
+pub fn (mut c Connection) rollback() !bool {
+	if !c.is_connected {
+		return error("connection is closed")
+	}
+	unsafe {
+		rc := SQLEndTran(SQL_HANDLE_DBC, c.hdbc, SQL_ROLLBACK)
+		if !is_succeeded(int(rc)) {
+			diag := extract_diag_error(SQL_HANDLE_DBC, c.hdbc)
+			return error("rollback failed: ${diag}")
+		}
+		SQLSetConnectAttr(c.hdbc, SQL_ATTR_AUTOCOMMIT, SQL_AUTOCOMMIT_ON, 0)
+	}
+	c.in_tx = false
+	return true
+}
+
+// close disconnects from the database and releases both DBC and ENV handles.
+pub fn (mut c Connection) close() {
+	if c.is_connected {
+		unsafe {
+			if c.in_tx {
+				SQLEndTran(SQL_HANDLE_DBC, c.hdbc, SQL_ROLLBACK)
+			}
+			SQLDisconnect(c.hdbc)
+			SQLFreeHandle(SQL_HANDLE_DBC, c.hdbc)
+			SQLFreeHandle(SQL_HANDLE_ENV, c.henv)
+		}
+		c.hdbc = null_ptr()
+		c.henv = null_ptr()
+		c.is_connected = false
+		c.in_tx = false
+	}
+}
+
+// ============================================================================
+// 3. PREPARED STATEMENT (SQLPrepare / SQLExecute)
+// ============================================================================
+
+pub struct Statement {
+pub mut:
+	hstmt     voidptr
+	is_active bool
+}
+
+// prepare compiles a parameterized SQL statement on the database server.
+pub fn (c Connection) prepare(sql string) !Statement {
+	if !c.is_connected {
+		return error("cannot prepare statement on a closed ODBC connection")
+	}
+	unsafe {
+		mut hstmt := null_ptr()
+		rc_alloc := SQLAllocHandle(SQL_HANDLE_STMT, c.hdbc, &mut hstmt)
+		if !is_succeeded(int(rc_alloc)) {
+			diag := extract_diag_error(SQL_HANDLE_DBC, c.hdbc)
+			return error("failed to allocate statement handle: ${diag}")
+		}
+
+		rc_prep := SQLPrepare(hstmt, sql, SQL_NTS)
+		if !is_succeeded(int(rc_prep)) {
+			diag := extract_diag_error(SQL_HANDLE_STMT, hstmt)
+			SQLFreeHandle(SQL_HANDLE_STMT, hstmt)
+			return error("SQLPrepare failed: ${diag}")
+		}
+
+		return Statement{
+			hstmt:     hstmt,
+			is_active: true,
+		}
+	}
+}
+
+// exec executes a prepared statement and returns the number of affected rows.
+pub fn (s Statement) exec() !int {
+	if !s.is_active {
+		return error("prepared statement is closed")
+	}
+	unsafe {
+		rc_exec := SQLExecute(s.hstmt)
+		if !is_succeeded(int(rc_exec)) && int(rc_exec) != SQL_NO_DATA {
+			diag := extract_diag_error(SQL_HANDLE_STMT, s.hstmt)
+			return error("SQLExecute failed: ${diag}")
+		}
+		mut affected := i64(0)
+		SQLRowCount(s.hstmt, &mut affected)
+		SQLCloseCursor(s.hstmt)
+		if int(affected) < 0 {
+			return 0
+		}
+		return int(affected)
+	}
+}
+
+// query executes a prepared SELECT statement and returns its ResultSet.
+pub fn (s Statement) query() !ResultSet {
+	if !s.is_active {
+		return error("prepared statement is closed")
+	}
+	unsafe {
+		rc_exec := SQLExecute(s.hstmt)
+		if !is_succeeded(int(rc_exec)) {
+			diag := extract_diag_error(SQL_HANDLE_STMT, s.hstmt)
+			return error("SQLExecute failed: ${diag}")
+		}
+		rs := fetch_stmt_result_set(s.hstmt) or {
+			SQLCloseCursor(s.hstmt)
+			return error(err)
+		}
+		SQLCloseCursor(s.hstmt)
+		return rs
+	}
+}
+
+// close frees the underlying SQLHSTMT handle.
+pub fn (mut s Statement) close() {
+	if s.is_active {
+		unsafe {
+			SQLFreeHandle(SQL_HANDLE_STMT, s.hstmt)
+		}
+		s.hstmt = null_ptr()
+		s.is_active = false
+	}
+}

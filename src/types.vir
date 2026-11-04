@@ -1,0 +1,191 @@
+module odbc
+
+// DriverInfo represents an installed ODBC driver discovered via SQLDrivers.
+pub struct DriverInfo {
+pub mut:
+	name       string
+	attributes string
+}
+
+// DataSourceInfo represents a configured ODBC DSN discovered via SQLDataSources.
+pub struct DataSourceInfo {
+pub mut:
+	name   string
+	driver string
+}
+
+// ColumnInfo stores schema metadata for a result set column from SQLDescribeCol.
+pub struct ColumnInfo {
+pub mut:
+	name           string
+	data_type      int
+	column_size    i64
+	decimal_digits int
+	nullable       bool
+}
+
+// Row represents a single database record returned from a query.
+pub struct Row {
+pub mut:
+	columns []string
+	values  []string
+	nulls   []bool
+}
+
+pub fn (r Row) copy_row() Row {
+	return Row{
+		columns: r.columns.clone(),
+		values:  r.values.clone(),
+		nulls:   r.nulls.clone(),
+	}
+}
+
+pub fn (r Row) col_count() int {
+	return r.values.len
+}
+
+pub fn (r Row) index_of(col_name string) int {
+	for mut i := 0; i < r.columns.len; i += 1 {
+		if r.columns[i] == col_name {
+			return i
+		}
+	}
+	return -1
+}
+
+pub fn (r Row) get_at(idx int) string {
+	if idx < 0 || idx >= r.values.len {
+		return ""
+	}
+	return r.values[idx].clone()
+}
+
+pub fn (r Row) get(col_name string) string {
+	idx := r.index_of(col_name)
+	if idx < 0 {
+		return ""
+	}
+	return r.values[idx].clone()
+}
+
+pub fn (r Row) is_null_at(idx int) bool {
+	if idx < 0 || idx >= r.nulls.len {
+		return true
+	}
+	return r.nulls[idx]
+}
+
+pub fn (r Row) is_null(col_name string) bool {
+	idx := r.index_of(col_name)
+	if idx < 0 {
+		return true
+	}
+	return r.nulls[idx]
+}
+
+pub fn (r Row) get_int(col_name string) int {
+	s := r.get(col_name)
+	if s.len == 0 {
+		return 0
+	}
+	return s.to_int() or { 0 }
+}
+
+pub fn (r Row) get_i64(col_name string) i64 {
+	s := r.get(col_name)
+	if s.len == 0 {
+		return i64(0)
+	}
+	return s.to_i64() or { i64(0) }
+}
+
+pub fn (r Row) get_f64(col_name string) f64 {
+	s := r.get(col_name)
+	if s.len == 0 {
+		return 0.0
+	}
+	return s.to_f64() or { 0.0 }
+}
+
+pub fn (r Row) get_bool(col_name string) bool {
+	raw := r.get(col_name)
+	trimmed := raw.trim()
+	s := trimmed.to_lower()
+	return s == "1" || s == "true" || s == "t" || s == "yes" || s == "y"
+}
+
+// ResultSet encapsulates the columns, metadata, and rows returned by a query.
+pub struct ResultSet {
+pub mut:
+	columns     []string
+	column_meta []ColumnInfo
+	rows        []Row
+}
+
+pub fn (rs ResultSet) row_count() int {
+	return rs.rows.len
+}
+
+pub fn (rs ResultSet) col_count() int {
+	return rs.columns.len
+}
+
+pub fn (rs ResultSet) is_empty() bool {
+	return rs.rows.len == 0
+}
+
+pub fn (rs ResultSet) first() !Row {
+	if rs.rows.len == 0 {
+		return error("result set is empty")
+	}
+	return rs.rows[0].copy_row()
+}
+
+// ============================================================================
+// UNIVERSAL CONNECTION STRING BUILDERS
+// ============================================================================
+
+// postgres_dsn constructs a standard PostgreSQL ODBC connection string.
+pub fn postgres_dsn(driver string, host string, port int, database string, user string, password string) string {
+	mut drv := driver.clone()
+	if drv.len == 0 {
+		drv = "PostgreSQL Unicode"
+	}
+	return "Driver={${drv}};Server=${host};Port=${port};Database=${database};Uid=${user};Pwd=${password};"
+}
+
+// mysql_dsn constructs a standard MySQL / MariaDB ODBC connection string.
+pub fn mysql_dsn(driver string, host string, port int, database string, user string, password string) string {
+	mut drv := driver.clone()
+	if drv.len == 0 {
+		drv = "MySQL ODBC 8.0 Unicode Driver"
+	}
+	return "Driver={${drv}};Server=${host};Port=${port};Database=${database};User=${user};Password=${password};"
+}
+
+// sqlserver_dsn constructs a standard Microsoft SQL Server ODBC connection string.
+pub fn sqlserver_dsn(driver string, host string, port int, database string, user string, password string) string {
+	mut drv := driver.clone()
+	if drv.len == 0 {
+		drv = "ODBC Driver 17 for SQL Server"
+	}
+	return "Driver={${drv}};Server=${host},${port};Database=${database};Uid=${user};Pwd=${password};TrustServerCertificate=yes;"
+}
+
+// sqlite_dsn constructs a standard SQLite3 ODBC connection string.
+pub fn sqlite_dsn(driver string, db_path string) string {
+	mut drv := driver.clone()
+	if drv.len == 0 {
+		drv = "SQLite3"
+	}
+	return "Driver={${drv}};Database=${db_path};"
+}
+
+// duckdb_dsn constructs a standard DuckDB ODBC connection string.
+pub fn duckdb_dsn(driver string, db_path string) string {
+	mut drv := driver.clone()
+	if drv.len == 0 {
+		drv = "DuckDB Driver"
+	}
+	return "Driver={${drv}};Database=${db_path};"
+}

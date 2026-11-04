@@ -1,0 +1,292 @@
+module odbc
+
+#flag -lodbc
+
+// ============================================================================
+// 1. STANDARD ODBC 3.x CONSTANTS (ISO/IEC 9075-3 / CLI & unixODBC / MS ODBC)
+// ============================================================================
+
+// Return Codes (SQLRETURN)
+pub const SQL_SUCCESS           = 0
+pub const SQL_SUCCESS_WITH_INFO = 1
+pub const SQL_STILL_EXECUTING   = 2
+pub const SQL_NEED_DATA         = 99
+pub const SQL_NO_DATA           = 100
+pub const SQL_ERROR             = -1
+pub const SQL_INVALID_HANDLE    = -2
+
+// String Length Indicator
+pub const SQL_NTS               = -3
+pub const SQL_NULL_DATA         = -1
+pub const SQL_DATA_AT_EXEC      = -2
+
+// Handle Types
+pub const SQL_HANDLE_ENV        = 1
+pub const SQL_HANDLE_DBC        = 2
+pub const SQL_HANDLE_STMT       = 3
+pub const SQL_HANDLE_DESC       = 4
+
+// Environment Attributes
+pub const SQL_ATTR_ODBC_VERSION       = 200
+pub const SQL_ATTR_CONNECTION_POOLING = 201
+pub const SQL_ATTR_CP_MATCH           = 202
+pub const SQL_OV_ODBC2                = 2
+pub const SQL_OV_ODBC3                = 3
+pub const SQL_OV_ODBC3_80             = 380
+
+// Connection Attributes
+pub const SQL_ATTR_ASYNC_ENABLE       = 4
+pub const SQL_ATTR_AUTOCOMMIT         = 102
+pub const SQL_ATTR_LOGIN_TIMEOUT      = 103
+pub const SQL_ATTR_TRACE              = 104
+pub const SQL_ATTR_TRANSLATE_OPTION   = 107
+pub const SQL_ATTR_TXN_ISOLATION      = 108
+pub const SQL_ATTR_CURRENT_CATALOG    = 109
+pub const SQL_ATTR_ODBC_CURSORS       = 110
+pub const SQL_ATTR_QUIET_MODE         = 111
+pub const SQL_ATTR_PACKET_SIZE        = 112
+pub const SQL_ATTR_CONNECTION_TIMEOUT = 113
+pub const SQL_ATTR_CONNECTION_DEAD    = 1209
+
+// Autocommit Modes
+pub const SQL_AUTOCOMMIT_OFF          = 0
+pub const SQL_AUTOCOMMIT_ON           = 1
+
+// DriverConnect Prompt Options
+pub const SQL_DRIVER_NOPROMPT          = 0
+pub const SQL_DRIVER_COMPLETE          = 1
+pub const SQL_DRIVER_PROMPT            = 2
+pub const SQL_DRIVER_COMPLETE_REQUIRED = 3
+
+// Fetch Directions (SQLFetchScroll / SQLDrivers / SQLDataSources)
+pub const SQL_FETCH_NEXT         = 1
+pub const SQL_FETCH_FIRST        = 2
+pub const SQL_FETCH_LAST         = 3
+pub const SQL_FETCH_PRIOR        = 4
+pub const SQL_FETCH_ABSOLUTE     = 5
+pub const SQL_FETCH_RELATIVE     = 6
+pub const SQL_FETCH_FIRST_USER   = 31
+pub const SQL_FETCH_FIRST_SYSTEM = 32
+
+// Transaction Completion Types (SQLEndTran)
+pub const SQL_COMMIT            = 0
+pub const SQL_ROLLBACK          = 1
+
+// Parameter Directions (SQLBindParameter)
+pub const SQL_PARAM_INPUT        = 1
+pub const SQL_PARAM_INPUT_OUTPUT = 2
+pub const SQL_PARAM_OUTPUT       = 4
+
+// Standard SQL Data Types
+pub const SQL_UNKNOWN_TYPE      = 0
+pub const SQL_CHAR              = 1
+pub const SQL_NUMERIC           = 2
+pub const SQL_DECIMAL           = 3
+pub const SQL_INTEGER           = 4
+pub const SQL_SMALLINT          = 5
+pub const SQL_FLOAT             = 6
+pub const SQL_REAL              = 7
+pub const SQL_DOUBLE            = 8
+pub const SQL_DATETIME          = 9
+pub const SQL_VARCHAR           = 12
+pub const SQL_TYPE_DATE         = 91
+pub const SQL_TYPE_TIME         = 92
+pub const SQL_TYPE_TIMESTAMP    = 93
+pub const SQL_LONGVARCHAR       = -1
+pub const SQL_BINARY            = -2
+pub const SQL_VARBINARY         = -3
+pub const SQL_LONGVARBINARY     = -4
+pub const SQL_BIGINT            = -5
+pub const SQL_TINYINT           = -6
+pub const SQL_BIT               = -7
+pub const SQL_WCHAR             = -8
+pub const SQL_WVARCHAR          = -9
+pub const SQL_WLONGVARCHAR      = -10
+pub const SQL_GUID              = -11
+
+// C Target Data Types (SQLGetData / SQLBindCol / SQLBindParameter)
+pub const SQL_C_CHAR            = 1
+pub const SQL_C_LONG            = 4
+pub const SQL_C_SHORT           = 5
+pub const SQL_C_FLOAT           = 7
+pub const SQL_C_DOUBLE          = 8
+pub const SQL_C_DEFAULT         = 99
+pub const SQL_C_SBIGINT         = -25
+pub const SQL_C_BINARY          = -2
+
+// Nullability Constants
+pub const SQL_NO_NULLS          = 0
+pub const SQL_NULLABLE          = 1
+pub const SQL_NULLABLE_UNKNOWN  = 2
+
+// ============================================================================
+// 2. NATIVE C99 ODBC ABI BINDINGS & POINTER HELPERS
+// ============================================================================
+
+pub fn null_ptr() voidptr {
+	return 0
+}
+
+fn zero_short() c_short {
+	return 0
+}
+
+@[intrinsic: 'vira_str_from_cstr']
+fn cstr_to_string(ptr voidptr) string
+
+extern "C" {
+	// C standard heap helpers for scratch buffers
+	fn calloc(nmemb c_size, size c_size) voidptr
+	fn free(ptr voidptr)
+
+	// Handle Lifecycle
+	fn SQLAllocHandle(handle_type c_short, input_handle voidptr, output_handle &mut voidptr) c_short
+	fn SQLFreeHandle(handle_type c_short, handle voidptr) c_short
+
+	// Environment & Connection Configuration
+	fn SQLSetEnvAttr(env_handle voidptr, attribute c_int, value c_long, str_len c_int) c_short
+	fn SQLSetConnectAttr(conn_handle voidptr, attribute c_int, value c_long, str_len c_int) c_short
+
+	// Connection Establishment & Teardown
+	fn SQLDriverConnect(
+		hdbc voidptr,
+		hwnd voidptr,
+		conn_str_in &c_char,
+		cb_in c_short,
+		conn_str_out voidptr,
+		cb_out_max c_short,
+		pcb_out &mut c_short,
+		driver_completion c_ushort
+	) c_short
+
+	fn SQLConnect(
+		hdbc voidptr,
+		server_name &c_char,
+		name_len1 c_short,
+		user_name &c_char,
+		name_len2 c_short,
+		auth &c_char,
+		name_len3 c_short
+	) c_short
+
+	fn SQLDisconnect(hdbc voidptr) c_short
+
+	// Statement Preparation & Execution
+	fn SQLExecDirect(hstmt voidptr, sql_text &c_char, text_len c_int) c_short
+	fn SQLPrepare(hstmt voidptr, sql_text &c_char, text_len c_int) c_short
+	fn SQLExecute(hstmt voidptr) c_short
+	fn SQLCloseCursor(hstmt voidptr) c_short
+
+	// Parameter Binding
+	fn SQLBindParameter(
+		hstmt voidptr,
+		param_num c_ushort,
+		io_type c_short,
+		value_type c_short,
+		param_type c_short,
+		col_size c_ulong,
+		dec_digits c_short,
+		param_val_ptr voidptr,
+		buf_len c_long,
+		str_len_or_ind &mut i64
+	) c_short
+
+	// Result Set Metadata & Row Fetching
+	fn SQLNumResultCols(hstmt voidptr, col_count &mut c_short) c_short
+	fn SQLRowCount(hstmt voidptr, row_count &mut i64) c_short
+	fn SQLDescribeCol(
+		hstmt voidptr,
+		col_num c_ushort,
+		col_name voidptr,
+		buf_len c_short,
+		name_len &mut c_short,
+		data_type &mut c_short,
+		col_size &mut i64,
+		dec_digits &mut c_short,
+		nullable &mut c_short
+	) c_short
+	fn SQLFetch(hstmt voidptr) c_short
+	fn SQLGetData(
+		hstmt voidptr,
+		col_num c_ushort,
+		target_type c_short,
+		target_val voidptr,
+		buf_len c_long,
+		str_len_or_ind &mut i64
+	) c_short
+
+	// Transaction Control
+	fn SQLEndTran(handle_type c_short, handle voidptr, completion_type c_short) c_short
+
+	// Diagnostics & Driver / DSN Discovery
+	fn SQLGetDiagRec(
+		handle_type c_short,
+		handle voidptr,
+		rec_num c_short,
+		sqlstate voidptr,
+		native_err &mut int,
+		msg_text voidptr,
+		buf_len c_short,
+		text_len &mut c_short
+	) c_short
+
+	fn SQLDrivers(
+		henv voidptr,
+		direction c_ushort,
+		driver_desc voidptr,
+		desc_max c_short,
+		pcb_desc &mut c_short,
+		driver_attr voidptr,
+		attr_max c_short,
+		pcb_attr &mut c_short
+	) c_short
+
+	fn SQLDataSources(
+		henv voidptr,
+		direction c_ushort,
+		server_name voidptr,
+		buf_len1 c_short,
+		name_len1 &mut c_short,
+		description voidptr,
+		buf_len2 c_short,
+		name_len2 &mut c_short
+	) c_short
+}
+
+// is_succeeded returns true if the ODBC return code is SQL_SUCCESS or SQL_SUCCESS_WITH_INFO.
+pub fn is_succeeded(rc int) bool {
+	return rc == SQL_SUCCESS || rc == SQL_SUCCESS_WITH_INFO
+}
+
+// extract_diag_error queries SQLGetDiagRec on an ENV, DBC, or STMT handle and returns
+// a formatted diagnostic message with SQLSTATE and NativeError code.
+pub fn extract_diag_error(handle_type int, handle voidptr) string {
+	unsafe {
+		state_buf := calloc(8, 1)
+		msg_buf := calloc(1024, 1)
+		mut native_err := 0
+		mut text_len := zero_short()
+
+		rc := SQLGetDiagRec(
+			handle_type,
+			handle,
+			1,
+			state_buf,
+			&mut native_err,
+			msg_buf,
+			1023,
+			&mut text_len
+		)
+
+		mut result := "ODBC error (no diagnostic record available)"
+		if int(rc) == SQL_SUCCESS || int(rc) == SQL_SUCCESS_WITH_INFO {
+			sql_state := cstr_to_string(state_buf)
+			msg_str := cstr_to_string(msg_buf)
+			result = "[SQLSTATE ${sql_state}] (Code ${native_err}) ${msg_str}"
+		}
+
+		free(state_buf)
+		free(msg_buf)
+		return result
+	}
+}
