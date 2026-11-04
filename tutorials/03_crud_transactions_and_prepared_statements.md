@@ -132,3 +132,4 @@ defer stmt.close()
 rs := stmt.query()!
 println("Retrieved ${rs.row_count()} paid orders")
 ```
+

@@ -116,3 +116,4 @@ Every failable operation in `odbc` (`!Env`, `!Connection`, `!ResultSet`, `!int`)
 1. The 5-character ISO/ANSI **`SQLSTATE`** code (e.g. `08001` connection failure, `28000` invalid authorization, `42S02` table not found, `23505` unique constraint violation).
 2. The database vendor's **Native Error Code**.
 3. The driver's full diagnostic message.
+

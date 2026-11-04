@@ -524,3 +524,4 @@ pub fn (rs ResultSet) to_json() string {
 	out = "${out}]"
 	return out
 }
+

@@ -301,3 +301,4 @@ pub fn (mut p ConnectionPool) close_all() {
 	p.active_conns = 0
 	p.is_closed = true
 }
+
