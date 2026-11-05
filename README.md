@@ -39,6 +39,18 @@ brew install unixodbc
 brew install psqlodbc sqliteodbc
 ```
 
+### Windows (Native & Cross-Compilation from Linux/macOS)
+Windows includes the native Microsoft ODBC Driver Manager (`odbc32.dll` / `libodbc32.a`) out of the box. When compiling or cross-compiling for Windows (`-target windows`), Vira automatically translates `#flag -lodbc` to `-lodbc32`.
+
+To cross-compile Windows `.exe` binaries from Linux or macOS:
+```bash
+# Ubuntu / Debian
+sudo apt-get install -y gcc-mingw-w64-x86-64
+
+# macOS
+brew install mingw-w64
+```
+
 ---
 
 ## 2. Installing in Any Vira Project
@@ -75,11 +87,31 @@ require (
 
 ---
 
-## 4. Verification & Demo
+## 4. Verification, Cross-Compilation & Bundling
 
+### Run Unit Tests & Live Demo
 Run the unit test suite and full operations demo with Vira's zero-leak verifier:
 
 ```bash
 vira test
 vira run examples/universal_db_demo.vir
 ```
+
+### Building & Bundling (CLI vs. Native GUI Applications)
+
+You can compile and package ODBC-powered applications for Linux, macOS, and Windows:
+
+```bash
+# 1. Native Console / CLI build (Linux / macOS / Windows)
+vira build -prod -o db_demo examples/universal_db_demo.vir
+
+# 2. Cross-compile a Windows Console (.exe) binary from Linux/macOS
+vira build -prod -target windows -o db_demo.exe examples/universal_db_demo.vir
+
+# 3. Bundle a portable distribution archive (auto-detects Console CLI vs Native GUI)
+vira bundle -target windows -name "UniversalDBDemo" examples/universal_db_demo.vir
+```
+
+> **Note on GUI vs. CLI Bundling (`-gui` vs `-cli`):**  
+> - **Console / CLI tools** (like `examples/universal_db_demo.vir`) do not call `gui_init(...)`. `vira bundle` automatically detects this and builds them with the **Console Subsystem** (`IMAGE_SUBSYSTEM_WINDOWS_CUI` on Windows + `run.bat`, `.command` launcher on macOS, `Terminal=true` on Linux) so terminal output remains visible and the app never runs invisibly in the background.
+> - **Native GUI Database Dashboards** (apps that call `gui_init(...)` or `widget.App.init()`) are automatically compiled with the **GUI Subsystem** (`-mwindows` on Windows, `.app` bundle on macOS, `Terminal=false` on Linux) so no black `cmd.exe` console window appears behind your GUI window. You can also explicitly force either mode via `vira bundle -gui` or `vira bundle -cli`.
