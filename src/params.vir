@@ -1,0 +1,212 @@
+module odbc
+
+// ============================================================================
+// PARAMETER BINDING (`?` placeholders via SQLBindParameter)
+// ============================================================================
+//
+// Values are sent to the driver separately from the SQL text, so they are
+// never parsed as SQL. Use these instead of building SQL with escape_literal()
+// whenever a value comes from outside the program.
+//
+//     conn.exec_params("INSERT INTO users (name, age) VALUES (?, ?)",
+//         [odbc.text_param(name), odbc.int_param(age)])!
+
+pub const PARAM_TEXT  = 1
+pub const PARAM_INT   = 2
+pub const PARAM_FLOAT = 3
+pub const PARAM_NULL  = 4
+
+// Param is one value bound to a `?` placeholder.
+pub struct Param {
+pub mut:
+	kind int
+	text string
+	ival i64
+	fval f64
+}
+
+// text_param binds a string. Embedded NUL bytes are sent as part of the value.
+pub fn text_param(v string) Param {
+	return Param{
+		kind: PARAM_TEXT,
+		text: v.clone(),
+		ival: i64(0),
+		fval: 0.0,
+	}
+}
+
+// int_param binds a 64-bit integer (SQL_C_SBIGINT / SQL_BIGINT).
+pub fn int_param(v i64) Param {
+	return Param{
+		kind: PARAM_INT,
+		text: "",
+		ival: v,
+		fval: 0.0,
+	}
+}
+
+// float_param binds a double (SQL_C_DOUBLE / SQL_DOUBLE).
+pub fn float_param(v f64) Param {
+	return Param{
+		kind: PARAM_FLOAT,
+		text: "",
+		ival: i64(0),
+		fval: v,
+	}
+}
+
+// null_param binds SQL NULL.
+pub fn null_param() Param {
+	return Param{
+		kind: PARAM_NULL,
+		text: "",
+		ival: i64(0),
+		fval: 0.0,
+	}
+}
+
+// bind_and_execute binds `params` to a prepared `hstmt`, runs SQLExecute and
+// resets the bindings. Every buffer the driver reads lives in a local slice of
+// this function, so it stays valid until SQLExecute has returned. Returns the
+// SQLExecute return code; a binding failure is returned as an error.
+fn bind_and_execute(hstmt voidptr, params []Param) !int {
+	// Allocate every buffer first, then take pointers, so no slice moves
+	// after the driver has been given its address.
+	mut text_bufs := [][]u8{}
+	mut int_bufs := [][]i64{}
+	mut f64_bufs := [][]f64{}
+	mut inds := [][]i64{}
+
+	for mut i := 0; i < params.len; i += 1 {
+		p := params[i]
+		mut tb := []u8{}
+		mut ind := []i64{}
+		if p.kind == PARAM_TEXT {
+			tb = p.text.bytes()
+			ind.push(i64(p.text.len))
+		} else if p.kind == PARAM_NULL {
+			ind.push(i64(SQL_NULL_DATA))
+		} else {
+			ind.push(i64(8))
+		}
+		tb.push(u8(0))
+		text_bufs.push(tb)
+
+		mut ib := []i64{}
+		ib.push(p.ival)
+		int_bufs.push(ib)
+
+		mut fb := []f64{}
+		fb.push(p.fval)
+		f64_bufs.push(fb)
+
+		inds.push(ind)
+	}
+
+	unsafe {
+		for mut i := 0; i < params.len; i += 1 {
+			p := params[i]
+			mut rc := 0
+			if p.kind == PARAM_INT {
+				rc = int(SQLBindParameter(hstmt, i + 1, SQL_PARAM_INPUT, SQL_C_SBIGINT, SQL_BIGINT,
+					i64(0), 0, int_bufs[i], i64(8), inds[i]))
+			} else if p.kind == PARAM_FLOAT {
+				rc = int(SQLBindParameter(hstmt, i + 1, SQL_PARAM_INPUT, SQL_C_DOUBLE, SQL_DOUBLE,
+					i64(15), 0, f64_bufs[i], i64(8), inds[i]))
+			} else {
+				mut col_size := i64(p.text.len)
+				if col_size < i64(1) {
+					col_size = i64(1)
+				}
+				mut sql_type := SQL_VARCHAR
+				if p.text.len > 4000 {
+					sql_type = SQL_LONGVARCHAR
+				}
+				rc = int(SQLBindParameter(hstmt, i + 1, SQL_PARAM_INPUT, SQL_C_CHAR, sql_type,
+					col_size, 0, text_bufs[i], i64(p.text.len + 1), inds[i]))
+			}
+			if !is_succeeded(rc) {
+				diag := extract_diag_error(SQL_HANDLE_STMT, hstmt)
+				SQLFreeStmt(hstmt, SQL_RESET_PARAMS)
+				return error("SQLBindParameter failed for parameter ${i + 1}: ${diag}")
+			}
+		}
+
+		rc_exec := int(SQLExecute(hstmt))
+		if !is_succeeded(rc_exec) && rc_exec != SQL_NO_DATA {
+			diag := extract_diag_error(SQL_HANDLE_STMT, hstmt)
+			SQLFreeStmt(hstmt, SQL_RESET_PARAMS)
+			return error("SQLExecute failed: ${diag}")
+		}
+		// The driver has consumed the input values; drop its pointers to our
+		// buffers before they go out of scope. Fetching is unaffected.
+		SQLFreeStmt(hstmt, SQL_RESET_PARAMS)
+		return rc_exec
+	}
+}
+
+// clamp_count converts an SQLLEN row count to int without wrapping.
+fn clamp_count(n i64) int {
+	if n < i64(0) {
+		return 0
+	}
+	if n > i64(2147483647) {
+		return 2147483647
+	}
+	return int(n)
+}
+
+// exec_with executes a prepared statement with bound parameters and returns
+// the affected row count.
+pub fn (s Statement) exec_with(params []Param) !int {
+	if !s.is_active {
+		return error("prepared statement is closed")
+	}
+	bind_and_execute(s.hstmt, params)!
+	unsafe {
+		mut affected := i64(0)
+		SQLRowCount(s.hstmt, &mut affected)
+		SQLFreeStmt(s.hstmt, SQL_CLOSE)
+		return clamp_count(affected)
+	}
+}
+
+// query_with executes a prepared SELECT with bound parameters.
+pub fn (s Statement) query_with(params []Param) !ResultSet {
+	if !s.is_active {
+		return error("prepared statement is closed")
+	}
+	bind_and_execute(s.hstmt, params)!
+	rs := fetch_stmt_result_set(s.hstmt) or {
+		unsafe {
+			SQLFreeStmt(s.hstmt, SQL_CLOSE)
+		}
+		return error(err)
+	}
+	unsafe {
+		SQLFreeStmt(s.hstmt, SQL_CLOSE)
+	}
+	return rs
+}
+
+// exec_params prepares, binds and executes a single statement.
+pub fn (c Connection) exec_params(sql string, params []Param) !int {
+	mut st := c.prepare(sql)!
+	n := st.exec_with(params) or {
+		st.close()
+		return error(err)
+	}
+	st.close()
+	return n
+}
+
+// query_params prepares, binds and runs a single SELECT.
+pub fn (c Connection) query_params(sql string, params []Param) !ResultSet {
+	mut st := c.prepare(sql)!
+	rs := st.query_with(params) or {
+		st.close()
+		return error(err)
+	}
+	st.close()
+	return rs
+}

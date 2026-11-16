@@ -169,7 +169,11 @@ pub fn (mut p ConnectionPool) acquire() !Connection {
 						// Stale connection detected: close and replace it
 						p.health_checks_failed += i64(1)
 						candidate.close()
+						// Store the closed copy so the slot never keeps the freed handle.
+						p.slots.set(i, candidate)
+						p.idle_conns -= 1
 						fresh := connect_with_timeout(p.conn_str, p.login_timeout_sec)!
+						p.idle_conns += 1
 						p.total_created += i64(1)
 						p.slots.set(i, fresh)
 						p.slot_busy.set(i, true)
@@ -195,6 +199,16 @@ pub fn (mut p ConnectionPool) acquire() !Connection {
 
 	fresh := connect_with_timeout(p.conn_str, p.login_timeout_sec)!
 	p.total_created += i64(1)
+	// Reuse a slot whose connection was closed by a failed health check.
+	for mut i := 0; i < p.slots.len; i += 1 {
+		if !p.slot_busy[i] && !p.slots[i].is_connected {
+			p.slots.set(i, fresh)
+			p.slot_busy.set(i, true)
+			p.active_conns += 1
+			p.total_acquired += i64(1)
+			return fresh
+		}
+	}
 	p.slots.push(fresh)
 	p.slot_busy.push(true)
 	p.active_conns += 1
@@ -203,8 +217,18 @@ pub fn (mut p ConnectionPool) acquire() !Connection {
 }
 
 // release returns a leased Connection back to the pool, rolling back any uncommitted transaction.
+// A connection that did not come from this pool is closed, not adopted.
 pub fn (mut p ConnectionPool) release(mut conn Connection) {
 	if p.is_closed {
+		for mut i := 0; i < p.slots.len; i += 1 {
+			if p.slot_busy[i] && p.slots[i].hdbc == conn.hdbc {
+				p.slot_busy.set(i, false)
+				if p.active_conns > 0 {
+					p.active_conns -= 1
+				}
+				break
+			}
+		}
 		conn.close()
 		return
 	}
@@ -229,30 +253,10 @@ pub fn (mut p ConnectionPool) release(mut conn Connection) {
 		}
 	}
 
-	// Fallback if matched by first busy slot
-	for mut i := 0; i < p.slots.len; i += 1 {
-		if p.slot_busy[i] {
-			p.slots.set(i, conn)
-			p.slot_busy.set(i, false)
-			if p.active_conns > 0 {
-				p.active_conns -= 1
-			}
-			if conn.is_connected {
-				p.idle_conns += 1
-			}
-			p.total_released += i64(1)
-			return
-		}
-	}
-
-	if p.slots.len < p.max_conns && conn.is_connected {
-		p.slots.push(conn)
-		p.slot_busy.push(false)
-		p.idle_conns += 1
-		p.total_released += i64(1)
-	} else {
-		conn.close()
-	}
+	// Not a connection this pool leased out (or already released). Taking
+	// over a busy slot here would leak that slot's handle and hand the same
+	// handle to two callers, so the stranger is closed instead.
+	conn.close()
 }
 
 // seed_virtual_connections populates the pool with lightweight virtual connections for offline testing/demos.
@@ -284,21 +288,26 @@ pub fn (p ConnectionPool) stats() PoolStats {
 	}
 }
 
-// close_all disconnects and frees all connections managed by the pool.
+// close_all disconnects and frees every idle connection and stops new leases.
+// Connections that are still leased stay open until they are released.
 pub fn (mut p ConnectionPool) close_all() {
 	if p.is_closed {
 		return
 	}
 	for mut i := 0; i < p.slots.len; i += 1 {
+		if p.slot_busy[i] {
+			// Still leased: the holder owns the handle. release() on a closed
+			// pool closes it, so it is not freed under the holder here.
+			continue
+		}
 		mut c := p.slots[i]
 		if c.is_connected && c.hdbc != null_ptr() {
 			c.close()
 		}
+		c.is_connected = false
 		p.slots.set(i, c)
-		p.slot_busy.set(i, false)
 	}
 	p.idle_conns = 0
-	p.active_conns = 0
 	p.is_closed = true
 }
 

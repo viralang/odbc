@@ -11,7 +11,9 @@ pub const DIALECT_DUCKDB    = 4
 pub const DIALECT_SQLSERVER = 5
 pub const DIALECT_ORACLE    = 6
 
-// escape_literal doubles single quotes (' -> '') to prevent SQL injection in string literals.
+// escape_literal doubles single quotes (' -> ''). This is not enough on MySQL /
+// MariaDB without NO_BACKSLASH_ESCAPES, where `\'` still ends the literal.
+// Prefer exec_params() / query_params() for untrusted values.
 pub fn escape_literal(val string) string {
 	return val.replace("'", "''")
 }
@@ -35,7 +37,11 @@ pub fn quote_ident(ident string, dialect int) string {
 // ============================================================================
 
 // build_insert_sql constructs an INSERT INTO statement with escaped string literals
-// (pass "NULL" for SQL NULL values).
+// (pass "NULL" for SQL NULL values, so the text "NULL" itself cannot be stored).
+//
+// Only for trusted values: table and column names are inserted as given, and
+// escape_literal() does not protect against MySQL backslash escapes. For any
+// outside input use exec_params() with `?` placeholders.
 pub fn build_insert_sql(table string, columns []string, values []string) string {
 	mut cols_str := ""
 	for mut i := 0; i < columns.len; i += 1 {
@@ -252,11 +258,17 @@ pub fn build_paginated_sql(base_sql string, req PageRequest) string {
 	mut order_clause := ""
 	if req.order_by.len > 0 {
 		order_clause = " ORDER BY ${req.order_by}"
-	} else if req.dialect == DIALECT_SQLSERVER || req.dialect == DIALECT_ORACLE {
+	} else if req.dialect == DIALECT_SQLSERVER {
+		// SQL Server requires ORDER BY before OFFSET; Oracle does not, and
+		// rejects `(SELECT NULL)` without FROM DUAL.
 		order_clause = " ORDER BY (SELECT NULL)"
 	}
 
-	if req.dialect == DIALECT_SQLSERVER || req.dialect == DIALECT_ORACLE {
+	if req.dialect == DIALECT_ORACLE {
+		// Oracle ODBC drivers reject a trailing `;` (ORA-00911).
+		return "${base_sql}${order_clause} OFFSET ${offset} ROWS FETCH NEXT ${page_size} ROWS ONLY"
+	}
+	if req.dialect == DIALECT_SQLSERVER {
 		return "${base_sql}${order_clause} OFFSET ${offset} ROWS FETCH NEXT ${page_size} ROWS ONLY;"
 	}
 	return "${base_sql}${order_clause} LIMIT ${page_size} OFFSET ${offset};"
@@ -277,7 +289,10 @@ pub fn build_keyset_sql(base_sql string, cursor_col string, last_seen_val string
 	}
 
 	esc := escape_literal(last_seen_val)
-	if dialect == DIALECT_SQLSERVER || dialect == DIALECT_ORACLE {
+	if dialect == DIALECT_ORACLE {
+		return "${base_sql} ${join_kw} ${cursor_col} ${op} '${esc}' ORDER BY ${cursor_col} ${dir} OFFSET 0 ROWS FETCH NEXT ${page_size} ROWS ONLY"
+	}
+	if dialect == DIALECT_SQLSERVER {
 		return "${base_sql} ${join_kw} ${cursor_col} ${op} '${esc}' ORDER BY ${cursor_col} ${dir} OFFSET 0 ROWS FETCH NEXT ${page_size} ROWS ONLY;"
 	}
 	return "${base_sql} ${join_kw} ${cursor_col} ${op} '${esc}' ORDER BY ${cursor_col} ${dir} LIMIT ${page_size};"
@@ -452,11 +467,58 @@ pub fn (rs ResultSet) to_ascii_table() string {
 	return out
 }
 
+// json_escape escapes a string for use inside a JSON string literal (RFC 8259):
+// backslash, double quote and every control character below 0x20.
+pub fn json_escape(s string) string {
+	bs := s.bytes()
+	hex := "0123456789abcdef"
+	mut out := ""
+	mut start := 0
+	for mut i := 0; i < bs.len; i += 1 {
+		b := int(bs[i])
+		mut rep := ""
+		if b == 34 {
+			rep = "\\\""
+		} else if b == 92 {
+			rep = "\\\\"
+		} else if b == 10 {
+			rep = "\\n"
+		} else if b == 13 {
+			rep = "\\r"
+		} else if b == 9 {
+			rep = "\\t"
+		} else if b < 32 {
+			hi := hex.substr(b / 16, b / 16 + 1)
+			lo := hex.substr(b % 16, b % 16 + 1)
+			rep = "\\u00${hi}${lo}"
+		} else {
+			continue
+		}
+		piece := s.substr(start, i)
+		out = "${out}${piece}${rep}"
+		start = i + 1
+	}
+	if start == 0 {
+		return s.clone()
+	}
+	tail := s.substr(start, bs.len)
+	return "${out}${tail}"
+}
+
+// csv_field quotes a CSV field when it contains a comma, quote, CR or LF (RFC 4180).
+pub fn csv_field(raw string) string {
+	if raw.contains(",") || raw.contains("\"") || raw.contains("\n") || raw.contains("\r") {
+		esc := raw.replace("\"", "\"\"")
+		return "\"${esc}\""
+	}
+	return raw.clone()
+}
+
 // to_csv exports the ResultSet to RFC-4180 CSV format.
 pub fn (rs ResultSet) to_csv() string {
 	mut out := ""
 	for mut c := 0; c < rs.columns.len; c += 1 {
-		col_name := rs.columns[c]
+		col_name := csv_field(rs.columns[c])
 		if c == 0 {
 			out = col_name.clone()
 		} else {
@@ -471,12 +533,7 @@ pub fn (rs ResultSet) to_csv() string {
 			mut cell := ""
 			if !row.is_null_at(c) {
 				raw := row.get_at(c)
-				if raw.contains(",") || raw.contains("\"") || raw.contains("\n") {
-					esc := raw.replace("\"", "\"\"")
-					cell = "\"${esc}\""
-				} else {
-					cell = raw.clone()
-				}
+				cell = csv_field(raw)
 			}
 			if c == 0 {
 				line = cell.clone()
@@ -499,13 +556,13 @@ pub fn (rs ResultSet) to_json() string {
 		row := rs.rows[r_idx]
 		mut obj := "{"
 		for mut c := 0; c < rs.columns.len; c += 1 {
-			col_name := rs.columns[c]
+			col_name := json_escape(rs.columns[c])
 			mut kv := ""
 			if row.is_null_at(c) {
 				kv = "\"${col_name}\":null"
 			} else {
 				raw := row.get_at(c)
-				esc := raw.replace("\"", "\\\"")
+				esc := json_escape(raw)
 				kv = "\"${col_name}\":\"${esc}\""
 			}
 			if c == 0 {

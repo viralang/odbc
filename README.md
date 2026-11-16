@@ -81,16 +81,29 @@ require (
 | **Discovery & DSNs** | `list_drivers()`, `list_data_sources()`, `postgres_dsn`, `mysql_dsn`, `sqlserver_dsn`, `sqlite_dsn`, `duckdb_dsn` | Enumerates OS-registered ODBC drivers/DSNs and builds connection strings. |
 | **Connections** | `connect()`, `connect_with_timeout()`, `connect_dsn()`, `conn.ping()`, `conn.close()` | Establishes connections (`SQLDriverConnect` / `SQLConnect`), checks liveness (`SELECT 1`), and frees handles. |
 | **Connection Pooling** | `enable_driver_pooling()`, `ConnectionPool.new()`, `pool.warmup()`, `pool.acquire()`, `pool.release()`, `pool.stats()`, `pool.close_all()` | OS-level Driver Manager pooling (`SQL_ATTR_CONNECTION_POOLING`) and managed `ConnectionPool` with health checks and telemetry. |
-| **CRUD & Batching** | `conn.exec()`, `conn.insert_row()`, `conn.update_rows()`, `conn.delete_rows()`, `conn.exec_batch_tx()`, `escape_literal()`, `quote_ident()`, `build_insert_sql()`, `build_upsert_postgres_sql()`, `build_update_sql()`, `build_delete_sql()` | Full SQL CRUD builders, safe literal escaping, ACID transactions (`begin_tx`, `commit`, `rollback`), and atomic batch execution. |
-| **Result Retrieval & Export** | `conn.query()`, `conn.query_row()`, `conn.query_scalar()`, `conn.query_int()`, `rs.to_ascii_table()`, `rs.to_csv()`, `rs.to_json()`, `rs.filter_eq()`, `rs.column_values()` | Materializes `ResultSet` & `Row` values with typed getters (`get_int`, `get_f64`, `get_bool`, `is_null`) and exports to ASCII tables, CSV, and JSON. |
+| **CRUD & Batching** | `conn.exec()`, `conn.insert_row()`, `conn.update_rows()`, `conn.delete_rows()`, `conn.exec_batch_tx()`, `escape_literal()`, `quote_ident()`, `build_insert_sql()`, `build_upsert_postgres_sql()`, `build_update_sql()`, `build_delete_sql()` | SQL CRUD builders for trusted values (see the note below), literal escaping, ACID transactions (`begin_tx`, `commit`, `rollback`), and atomic batch execution. |
+| **Result Retrieval & Export** | `conn.query()`, `conn.query_row()`, `conn.query_scalar()`, `conn.query_int()`, `rs.to_ascii_table()`, `rs.to_csv()`, `rs.to_json()`, `json_escape()`, `csv_field()`, `rs.filter_eq()`, `rs.column_values()` | Materializes `ResultSet` & `Row` values with typed getters (`get_int`, `get_f64`, `get_bool`, `is_null`) and exports to ASCII tables, CSV, and JSON. |
+| **Shared Pool (actors / threads)** | `SharedPool.new()`, `shared <- acquire()`, `shared <- release_conn(conn)`, `shared <- stats()`, `shared <- close_all()` | A `ConnectionPool` wrapped in an actor: one handle, no copies, and every lease and release runs one at a time. |
+| **Parameter Binding** | `conn.exec_params()`, `conn.query_params()`, `stmt.exec_with()`, `stmt.query_with()`, `text_param()`, `int_param()`, `float_param()`, `null_param()` | `?` placeholders bound with `SQLBindParameter`: values never pass through the SQL parser. Use these for any value from outside the program. |
 | **Pagination** | `new_page_request()`, `conn.query_page()`, `rs.paginate()`, `build_paginated_sql()`, `build_keyset_sql()` | Dialect-aware `LIMIT/OFFSET`, SQL Server/Oracle `OFFSET/FETCH NEXT`, cursor/keyset pagination, and in-memory `ResultSet` pagination. |
+
+> **Safety notes**
+> - `escape_literal()` only doubles single quotes. On MySQL / MariaDB (without `NO_BACKSLASH_ESCAPES`) a `\'` in the value still ends the literal, and the CRUD builders insert table names, column names and `WHERE` text as given. Use `exec_params()` / `query_params()` for untrusted input.
+> - The builders treat the value `"NULL"` as SQL `NULL`; bind `text_param("NULL")` to store that text.
+> - `Connection` holds raw ODBC handles. Copies (`b := a`, a pool lease) share them, and closing one copy does not mark the others closed. Close exactly one copy.
+> - `ConnectionPool` is a plain struct and is not safe to share between actors or threads. Use `SharedPool` for that, and hand each leased `Connection` to one actor at a time.
+> - Oracle SQL from the pagination builders has no trailing `;` (Oracle ODBC drivers reject it). The other generated SQL still ends with `;`.
+> - Values longer than the 16 KB read buffer are read in chunks and returned whole. Values are read as text, so binary data stops at its first NUL byte.
 
 ---
 
 ## 4. Verification, Cross-Compilation & Bundling
 
 ### Run Unit Tests & Live Demo
-Run the unit test suite and full operations demo with Vira's zero-leak verifier:
+Run the unit test suite and full operations demo with Vira's zero-leak verifier.
+`tests/live_sqlite_test.vir` runs against a real in-memory database through the
+SQLite ODBC driver (`sudo apt-get install -y libsqliteodbc`) and skips when that
+driver is not installed:
 
 ```bash
 vira test

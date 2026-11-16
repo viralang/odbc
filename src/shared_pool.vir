@@ -1,0 +1,92 @@
+module odbc
+
+// ============================================================================
+// SharedPool: a ConnectionPool that several actors or threads can use
+// ============================================================================
+//
+// SharedPool is an actor, so it is a handle that cannot be copied and its
+// messages run one at a time. That serialises every acquire / release.
+//
+//     mut shared := odbc.SharedPool.new(odbc.default_pool_config(dsn, 8))
+//     mut conn := shared <- acquire() or { ... }
+//     ...
+//     shared <- release_conn(conn)
+//
+// Hand a leased Connection to one actor at a time: ODBC connection handles
+// are not meant for concurrent use.
+//
+// A supervisor restart resets an actor's mutable fields, which would drop the
+// pool's bookkeeping, so no SharedPool method panics: failures are returned
+// as errors instead.
+
+pub actor SharedPool {
+pub:
+	config PoolConfig
+mut:
+	pool    ConnectionPool
+	started bool
+}
+
+// SharedPool.new creates the actor. Connections are opened on first use.
+pub fn SharedPool.new(config PoolConfig) SharedPool {
+	return SharedPool{
+		config: config,
+	}
+}
+
+fn (mut s SharedPool) ensure_pool() !bool {
+	if !s.started {
+		mut cfg := s.config
+		mut warm := cfg.min_conns
+		cfg.min_conns = 0
+		s.pool = ConnectionPool.new(cfg)!
+		s.started = true
+		if warm > 0 {
+			s.pool.warmup(warm)!
+		}
+	}
+	return true
+}
+
+// acquire leases a connection (see ConnectionPool.acquire).
+pub fn (mut s SharedPool) acquire() !Connection {
+	s.ensure_pool()!
+	return s.pool.acquire()!
+}
+
+// release_conn returns a leased connection (see ConnectionPool.release).
+// (Not named `release`: Vira compilers before the actor-destructor rename
+// generate a C function with that name for every actor.)
+pub fn (mut s SharedPool) release_conn(conn Connection) bool {
+	mut c := conn
+	if !s.started {
+		c.close()
+		return false
+	}
+	s.pool.release(mut c)
+	return true
+}
+
+// stats returns a snapshot of pool utilisation.
+pub fn (mut s SharedPool) stats() PoolStats {
+	if !s.started {
+		return PoolStats{
+			max_conns:            s.config.max_conns,
+			idle_conns:           0,
+			active_conns:         0,
+			total_created:        i64(0),
+			total_acquired:       i64(0),
+			total_released:       i64(0),
+			health_checks_failed: i64(0),
+		}
+	}
+	return s.pool.stats()
+}
+
+// close_all closes idle connections and stops new leases (see ConnectionPool.close_all).
+pub fn (mut s SharedPool) close_all() bool {
+	if s.started {
+		s.pool.close_all()
+	}
+	return true
+}

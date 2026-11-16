@@ -1,0 +1,67 @@
+module main
+
+import odbc
+
+fn sqlite_installed() bool {
+	drivers := odbc.list_drivers() or { return false }
+	for mut i := 0; i < drivers.len; i += 1 {
+		if drivers[i].name == "SQLite3" {
+			return true
+		}
+	}
+	return false
+}
+
+actor Client {
+pub:
+	id int
+}
+
+// work leases a connection from the shared pool, runs a query and gives it back.
+pub fn (mut c Client) work(mut shared odbc.SharedPool, rounds int) int {
+	mut ok := 0
+	for mut r := 0; r < rounds; r += 1 {
+		mut conn := shared <- acquire() or { continue }
+		v := conn.query_int("SELECT 41 + 1") or { 0 }
+		if v == 42 {
+			ok += 1
+		}
+		_ := shared <- release_conn(conn) or { false }
+	}
+	return ok
+}
+
+fn test_shared_pool_across_actors() {
+	if !sqlite_installed() {
+		println("  [shared_pool_test] SKIP: SQLite3 ODBC driver not installed")
+		return
+	}
+	dsn := odbc.sqlite_dsn("SQLite3", ":memory:")
+	mut shared := odbc.SharedPool.new(odbc.default_pool_config(dsn, 4))
+
+	mut clients := []Client{}
+	for mut i := 0; i < 4; i += 1 {
+		clients.push(Client{ id: i })
+	}
+	// Written for the released compiler too: futures sit in separate variables
+	// (a []Future[int] slice did not compile before Vira commit "slice of
+	// futures"), and results are unwrapped before adding, because
+	// `x += f() or { 0 }` used to overwrite x instead of adding.
+	f0 := clients[0] <- work(mut shared, 25)
+	f1 := clients[1] <- work(mut shared, 25)
+	f2 := clients[2] <- work(mut shared, 25)
+	f3 := clients[3] <- work(mut shared, 25)
+	r0 := f0.await() or { 0 }
+	r1 := f1.await() or { 0 }
+	r2 := f2.await() or { 0 }
+	r3 := f3.await() or { 0 }
+	total := r0 + r1 + r2 + r3
+	st := shared <- stats() or { panic("stats: ${err}") }
+	_ := shared <- close_all() or { false }
+	if total != 100 {
+		panic("expected 100 successful leases, got ${total}")
+	}
+	if st.active_conns != 0 || st.total_acquired != st.total_released || st.total_created > i64(4) {
+		panic("bad pool stats: active=${st.active_conns} acq=${st.total_acquired} rel=${st.total_released} created=${st.total_created}")
+	}
+}

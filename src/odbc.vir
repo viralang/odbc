@@ -310,11 +310,7 @@ pub fn (c Connection) exec(sql string) !int {
 		mut affected := i64(0)
 		SQLRowCount(hstmt, &mut affected)
 		SQLFreeHandle(SQL_HANDLE_STMT, hstmt)
-
-		if int(affected) < 0 {
-			return 0
-		}
-		return int(affected)
+		return clamp_count(affected)
 	}
 }
 
@@ -390,28 +386,49 @@ fn fetch_stmt_result_set(hstmt voidptr) !ResultSet {
 			for mut col_idx := 1; col_idx <= col_total; col_idx += 1 {
 				row_cols.push(cols[col_idx - 1].clone())
 
-				mut indicator := i64(0)
-				rc_data := SQLGetData(
-					hstmt,
-					col_idx,
-					SQL_C_CHAR,
-					cell_buf,
-					cell_buf_cap - 1,
-					&mut indicator
-				)
-
-				if !is_succeeded(int(rc_data)) {
-					free(cell_buf)
-					diag := extract_diag_error(SQL_HANDLE_STMT, hstmt)
-					return error("SQLGetData failed on column ${col_idx}: ${diag}")
+				// Read the value in chunks. A value longer than the buffer comes
+				// back as SQL_SUCCESS_WITH_INFO (SQLSTATE 01004) and the next
+				// SQLGetData call continues where the last one stopped.
+				mut cell := ""
+				mut cell_null := false
+				for {
+					mut indicator := i64(0)
+					rc_data := int(SQLGetData(
+						hstmt,
+						col_idx,
+						SQL_C_CHAR,
+						cell_buf,
+						i64(cell_buf_cap),
+						&mut indicator
+					))
+					if rc_data == SQL_NO_DATA {
+						break
+					}
+					if !is_succeeded(rc_data) {
+						free(cell_buf)
+						diag := extract_diag_error(SQL_HANDLE_STMT, hstmt)
+						return error("SQLGetData failed on column ${col_idx}: ${diag}")
+					}
+					if indicator == i64(SQL_NULL_DATA) {
+						cell_null = true
+						break
+					}
+					chunk := cstr_to_string(cell_buf)
+					cell = "${cell}${chunk}"
+					if rc_data == SQL_SUCCESS {
+						break
+					}
+					// SQL_SUCCESS_WITH_INFO without truncation (the whole value fit)
+					if indicator != i64(SQL_NO_TOTAL) && indicator < i64(cell_buf_cap) {
+						break
+					}
 				}
 
-				if int(indicator) == SQL_NULL_DATA {
+				if cell_null {
 					row_vals.push("")
 					row_nulls.push(true)
 				} else {
-					val_str := cstr_to_string(cell_buf)
-					row_vals.push(val_str)
+					row_vals.push(cell)
 					row_nulls.push(false)
 				}
 			}
@@ -526,6 +543,10 @@ pub fn (mut c Connection) rollback() !bool {
 }
 
 // close disconnects from the database and releases both DBC and ENV handles.
+//
+// Connection holds raw ODBC handles. A copy (`b := a`, a pool lease) shares
+// them, and closing one copy does not mark the others closed: close exactly
+// one copy, and stop using the rest.
 pub fn (mut c Connection) close() {
 	if c.is_connected {
 		unsafe {
@@ -593,11 +614,8 @@ pub fn (s Statement) exec() !int {
 		}
 		mut affected := i64(0)
 		SQLRowCount(s.hstmt, &mut affected)
-		SQLCloseCursor(s.hstmt)
-		if int(affected) < 0 {
-			return 0
-		}
-		return int(affected)
+		SQLFreeStmt(s.hstmt, SQL_CLOSE)
+		return clamp_count(affected)
 	}
 }
 
