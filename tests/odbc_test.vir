@@ -268,3 +268,47 @@ fn test_diagnostic_error_handling() {
 		panic("expected connection to non-existent driver to fail with SQLSTATE diagnostic")
 	}
 }
+
+fn test_json_and_csv_escaping() {
+	j := odbc.json_escape("a\\b \"q\"\nline\ttab\r")
+	if j != "a\\\\b \\\"q\\\"\\nline\\ttab\\r" {
+		panic("unexpected json_escape: ${j}")
+	}
+	if odbc.json_escape("plain") != "plain" {
+		panic("json_escape changed a plain string")
+	}
+	ctl := odbc.json_escape("x\0y")
+	if ctl != "x\\u0000y" {
+		panic("unexpected control escape: ${ctl}")
+	}
+	if odbc.csv_field("a\rb") != "\"a\rb\"" || odbc.csv_field("ok") != "ok" {
+		panic("csv_field must quote CR")
+	}
+}
+
+fn test_pool_close_all_keeps_leases() {
+	dsn := odbc.sqlite_dsn("", "/nonexistent/none.db")
+	mut pool := odbc.ConnectionPool.new(odbc.default_pool_config(dsn, 2)) or {
+		panic("ConnectionPool.new failed: ${err}")
+	}
+	pool.seed_virtual_connections(1)
+	mut leased := pool.acquire() or { panic("acquire failed: ${err}") }
+
+	// close_all leaves leased connections to their holder.
+	pool.close_all()
+	if pool.stats().active_conns != 1 {
+		panic("close_all must not drop leased connections from the count")
+	}
+	pool.release(mut leased)
+	if pool.stats().active_conns != 0 || leased.is_open() {
+		panic("release after close_all must close the lease")
+	}
+}
+
+fn test_oracle_pagination_has_no_select_null() {
+	req := odbc.new_page_request(2, 5, "", odbc.DIALECT_ORACLE)
+	sql := odbc.build_paginated_sql("SELECT * FROM t", req)
+	if sql.contains("SELECT NULL") {
+		panic("Oracle pagination must not use ORDER BY (SELECT NULL): ${sql}")
+	}
+}

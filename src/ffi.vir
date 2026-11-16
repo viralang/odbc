@@ -19,6 +19,7 @@ pub const SQL_INVALID_HANDLE    = -2
 pub const SQL_NTS               = -3
 pub const SQL_NULL_DATA         = -1
 pub const SQL_DATA_AT_EXEC      = -2
+pub const SQL_NO_TOTAL          = -4
 
 // Handle Types
 pub const SQL_HANDLE_ENV        = 1
@@ -74,6 +75,11 @@ pub const SQL_FETCH_ABSOLUTE     = 5
 pub const SQL_FETCH_RELATIVE     = 6
 pub const SQL_FETCH_FIRST_USER   = 31
 pub const SQL_FETCH_FIRST_SYSTEM = 32
+
+// SQLFreeStmt Options
+pub const SQL_CLOSE             = 0
+pub const SQL_UNBIND            = 2
+pub const SQL_RESET_PARAMS      = 3
 
 // Transaction Completion Types (SQLEndTran)
 pub const SQL_COMMIT            = 0
@@ -151,8 +157,10 @@ extern "C" {
 	fn SQLFreeHandle(handle_type c_short, handle voidptr) c_short
 
 	// Environment & Connection Configuration
-	fn SQLSetEnvAttr(env_handle voidptr, attribute c_int, value c_long, str_len c_int) c_short
-	fn SQLSetConnectAttr(conn_handle voidptr, attribute c_int, value c_long, str_len c_int) c_short
+	// `value` is an SQLPOINTER that carries an integer here. i64 has pointer
+	// width on every 64-bit target; c_long is only 32 bits on Windows.
+	fn SQLSetEnvAttr(env_handle voidptr, attribute c_int, value i64, str_len c_int) c_short
+	fn SQLSetConnectAttr(conn_handle voidptr, attribute c_int, value i64, str_len c_int) c_short
 
 	// Connection Establishment & Teardown
 	fn SQLDriverConnect(
@@ -183,19 +191,23 @@ extern "C" {
 	fn SQLPrepare(hstmt voidptr, sql_text &c_char, text_len c_int) c_short
 	fn SQLExecute(hstmt voidptr) c_short
 	fn SQLCloseCursor(hstmt voidptr) c_short
+	fn SQLFreeStmt(hstmt voidptr, option c_ushort) c_short
 
-	// Parameter Binding
+	// Parameter Binding. SQLLEN / SQLULEN are 64-bit on every 64-bit target
+	// (including Windows, where c_long is 32-bit), so they are declared i64.
+	// param_val_ptr and str_len_or_ind receive slice data pointers, which must
+	// stay alive until SQLExecute returns.
 	fn SQLBindParameter(
 		hstmt voidptr,
 		param_num c_ushort,
 		io_type c_short,
 		value_type c_short,
 		param_type c_short,
-		col_size c_ulong,
+		col_size i64,
 		dec_digits c_short,
 		param_val_ptr voidptr,
-		buf_len c_long,
-		str_len_or_ind &mut i64
+		buf_len i64,
+		str_len_or_ind voidptr
 	) c_short
 
 	// Result Set Metadata & Row Fetching
@@ -218,7 +230,7 @@ extern "C" {
 		col_num c_ushort,
 		target_type c_short,
 		target_val voidptr,
-		buf_len c_long,
+		buf_len i64,
 		str_len_or_ind &mut i64
 	) c_short
 

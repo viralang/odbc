@@ -79,6 +79,8 @@ pool.release(mut conn)
 
 > **Automatic Transaction Safety:** If a leased connection was left inside an uncommitted transaction (`conn.in_tx == true`), `pool.release(mut conn)` automatically executes `conn.rollback()` before placing the connection back into the idle pool so subsequent callers never inherit dirty transaction state.
 
+> **Ownership rules:** `release` only takes back connections this pool leased out; anything else is closed, not adopted. `close_all()` closes the idle connections and stops new leases, but leaves leased connections open until their holder calls `release`, which then closes them. A pool is not safe to share between actors or threads.
+
 ---
 
 ## 4. Monitoring Pool Telemetry (`PoolStats`)

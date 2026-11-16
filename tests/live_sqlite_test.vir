@@ -1,0 +1,131 @@
+module main
+
+import odbc
+
+// Runs against a real database through the SQLite ODBC driver
+// (Debian/Ubuntu: `apt-get install libsqliteodbc`). Skips when it is missing.
+
+fn sqlite_driver() string {
+	drivers := odbc.list_drivers() or { return "" }
+	for mut i := 0; i < drivers.len; i += 1 {
+		if drivers[i].name == "SQLite3" {
+			return "SQLite3"
+		}
+	}
+	return ""
+}
+
+fn open_db() !odbc.Connection {
+	return odbc.connect(odbc.sqlite_dsn("SQLite3", ":memory:"))!
+}
+
+fn test_live_params_values_and_tx() {
+	if sqlite_driver().len == 0 {
+		println("  [live_sqlite_test] SKIP: SQLite3 ODBC driver not installed")
+		return
+	}
+	mut c := open_db() or { panic("connect: ${err}") }
+	c.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT, score REAL)") or { panic("create: ${err}") }
+
+	// Bound parameters: the text "NULL", quotes, backslashes and a real NULL.
+	tricky := "O'Brien \\' ); DROP TABLE t; --"
+	mut p1 := []odbc.Param{}
+	p1.push(odbc.int_param(i64(1)))
+	p1.push(odbc.text_param("NULL"))
+	p1.push(odbc.float_param(2.5))
+	n1 := c.exec_params("INSERT INTO t (id, name, score) VALUES (?, ?, ?)", p1) or { panic("insert 1: ${err}") }
+	mut p2 := []odbc.Param{}
+	p2.push(odbc.int_param(i64(2)))
+	p2.push(odbc.text_param(tricky))
+	p2.push(odbc.null_param())
+	n2 := c.exec_params("INSERT INTO t (id, name, score) VALUES (?, ?, ?)", p2) or { panic("insert 2: ${err}") }
+	if n1 != 1 || n2 != 1 {
+		panic("expected 1 affected row per insert, got ${n1} and ${n2}")
+	}
+
+	mut q := []odbc.Param{}
+	q.push(odbc.int_param(i64(1)))
+	r1 := c.query_params("SELECT name, score FROM t WHERE id = ?", q) or { panic("q1: ${err}") }
+	row1 := r1.first() or { panic("row 1 missing") }
+	if row1.is_null("name") || row1.get("name") != "NULL" || row1.get_f64("score") != 2.5 {
+		panic("text 'NULL' or float did not round-trip: ${r1.to_json()}")
+	}
+
+	mut q2 := []odbc.Param{}
+	q2.push(odbc.text_param(tricky))
+	r2 := c.query_params("SELECT id, score FROM t WHERE name = ?", q2) or { panic("q2: ${err}") }
+	row2 := r2.first() or { panic("tricky text did not round-trip") }
+	if row2.get_int("id") != 2 || !row2.is_null("score") {
+		panic("unexpected row 2: ${r2.to_json()}")
+	}
+
+	// Prepared statement reused with different parameters.
+	mut st := c.prepare("SELECT COUNT(*) FROM t WHERE id >= ?") or { panic("prepare: ${err}") }
+	mut a := []odbc.Param{}
+	a.push(odbc.int_param(i64(1)))
+	mut b := []odbc.Param{}
+	b.push(odbc.int_param(i64(2)))
+	ca := st.query_with(a) or { panic("query_with a: ${err}") }
+	cb := st.query_with(b) or { panic("query_with b: ${err}") }
+	st.close()
+	if ca.rows[0].get_at(0) != "2" || cb.rows[0].get_at(0) != "1" {
+		panic("prepared reuse returned ${ca.rows[0].get_at(0)} and ${cb.rows[0].get_at(0)}")
+	}
+
+	// Values longer than the 16 KB read buffer come back whole.
+	big := "x".repeat(40000)
+	mut pb := []odbc.Param{}
+	pb.push(odbc.text_param(big))
+	c.exec_params("INSERT INTO t (id, name) VALUES (3, ?)", pb) or { panic("big insert: ${err}") }
+	got := c.query_scalar("SELECT name FROM t WHERE id = 3") or { panic("big read: ${err}") }
+	if got.len != 40000 {
+		panic("long value truncated: read ${got.len} of 40000 bytes")
+	}
+
+	// A failing batch rolls back.
+	mut stmts := []string{}
+	stmts.push("INSERT INTO t (id, name) VALUES (10, 'a')")
+	stmts.push("INSERT INTO t (id, name) VALUES (10, 'dup')")
+	mut failed := false
+	c.exec_batch_tx(stmts) or {
+		failed = true
+		0
+	}
+	left := c.query_int("SELECT COUNT(*) FROM t WHERE id = 10") or { panic("count: ${err}") }
+	if !failed || left != 0 {
+		panic("batch should fail and roll back, failed=${failed} rows=${left}")
+	}
+
+	c.close()
+}
+
+fn test_live_pool_rejects_strangers() {
+	if sqlite_driver().len == 0 {
+		println("  [live_sqlite_test] SKIP: SQLite3 ODBC driver not installed")
+		return
+	}
+	dsn := odbc.sqlite_dsn("SQLite3", ":memory:")
+	mut pool := odbc.ConnectionPool.new(odbc.default_pool_config(dsn, 2)) or { panic("pool: ${err}") }
+	mut a := pool.acquire() or { panic("acquire a: ${err}") }
+	mut b := pool.acquire() or { panic("acquire b: ${err}") }
+
+	// A connection that never came from the pool must not take over a busy slot.
+	mut stranger := odbc.connect(dsn) or { panic("stranger: ${err}") }
+	pool.release(mut stranger)
+	st := pool.stats()
+	if st.active_conns != 2 || st.idle_conns != 0 || st.total_released != i64(0) || stranger.is_open() {
+		panic("stranger release changed pool state: active=${st.active_conns} idle=${st.idle_conns}")
+	}
+	if pool.slots[0].hdbc != a.hdbc || pool.slots[1].hdbc != b.hdbc {
+		panic("pool lost track of a leased connection")
+	}
+
+	pool.release(mut a)
+	mut c := pool.acquire() or { panic("acquire c: ${err}") }
+	if !c.ping() || c.hdbc == b.hdbc {
+		panic("re-acquired connection is not the released one")
+	}
+	pool.release(mut b)
+	pool.release(mut c)
+	pool.close_all()
+}

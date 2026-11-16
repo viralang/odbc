@@ -25,7 +25,9 @@ _ := conn.exec("
 
 ## 2. Safe Literal Escaping & CRUD Helpers
 
-The `odbc` package provides SQL-injection-safe literal escaping (`odbc.escape_literal`) and dialect-aware identifier quoting (`odbc.quote_ident`), along with high-level CRUD builders and execution methods.
+The `odbc` package provides literal escaping (`odbc.escape_literal`) and dialect-aware identifier quoting (`odbc.quote_ident`), along with high-level CRUD builders and execution methods.
+
+> These builders are for values your program controls. `escape_literal` only doubles single quotes, which does not stop injection on MySQL / MariaDB with backslash escapes enabled. For input from users, files or the network, use bound parameters (section 4).
 
 ### Inserting Rows (`insert_row` & `build_insert_sql`)
 Pass `"NULL"` as a value string whenever you want to insert a SQL `NULL`:
@@ -131,5 +133,32 @@ defer stmt.close()
 
 rs := stmt.query()!
 println("Retrieved ${rs.row_count()} paid orders")
+```
+
+### Bound Parameters (`?` placeholders)
+
+Values passed as parameters are sent to the driver separately from the SQL text, so they are never parsed as SQL. They also carry real types and a real `NULL`:
+
+```v
+mut params := []odbc.Param{}
+params.push(odbc.text_param(customer))   // any text, including "NULL" or quotes
+params.push(odbc.float_param(149.99))
+params.push(odbc.null_param())
+conn.exec_params("INSERT INTO orders (customer, total_usd, notes) VALUES (?, ?, ?)", params)!
+
+mut q := []odbc.Param{}
+q.push(odbc.text_param("PAID"))
+paid := conn.query_params("SELECT id, customer FROM orders WHERE status = ?", q)!
+```
+
+A prepared statement can be run many times with different parameters:
+
+```v
+mut by_id := conn.prepare("SELECT customer FROM orders WHERE id = ?")!
+defer by_id.close()
+
+mut p := []odbc.Param{}
+p.push(odbc.int_param(i64(42)))
+row := by_id.query_with(p)!
 ```
 
