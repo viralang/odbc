@@ -305,10 +305,14 @@ fn test_pool_close_all_keeps_leases() {
 	}
 }
 
-fn test_oracle_pagination_has_no_select_null() {
+fn test_oracle_pagination_sql() {
 	req := odbc.new_page_request(2, 5, "", odbc.DIALECT_ORACLE)
 	sql := odbc.build_paginated_sql("SELECT * FROM t", req)
-	if sql.contains("SELECT NULL") {
-		panic("Oracle pagination must not use ORDER BY (SELECT NULL): ${sql}")
+	if sql != "SELECT * FROM t OFFSET 5 ROWS FETCH NEXT 5 ROWS ONLY" {
+		panic("Oracle pagination must have no ORDER BY (SELECT NULL) and no trailing ';': ${sql}")
+	}
+	ks := odbc.build_keyset_sql("SELECT * FROM t", "id", "9", 5, true, odbc.DIALECT_ORACLE)
+	if ks.ends_with(";") {
+		panic("Oracle keyset SQL must not end with ';': ${ks}")
 	}
 }

@@ -79,7 +79,18 @@ pool.release(mut conn)
 
 > **Automatic Transaction Safety:** If a leased connection was left inside an uncommitted transaction (`conn.in_tx == true`), `pool.release(mut conn)` automatically executes `conn.rollback()` before placing the connection back into the idle pool so subsequent callers never inherit dirty transaction state.
 
-> **Ownership rules:** `release` only takes back connections this pool leased out; anything else is closed, not adopted. `close_all()` closes the idle connections and stops new leases, but leaves leased connections open until their holder calls `release`, which then closes them. A pool is not safe to share between actors or threads.
+> **Ownership rules:** `release` only takes back connections this pool leased out; anything else is closed, not adopted. `close_all()` closes the idle connections and stops new leases, but leaves leased connections open until their holder calls `release`, which then closes them. A `ConnectionPool` is not safe to share between actors or threads; use `SharedPool` for that:
+
+```v
+mut shared := odbc.SharedPool.new(odbc.default_pool_config(dsn, 8))
+
+// inside any actor that was passed `mut shared odbc.SharedPool`
+mut conn := shared <- acquire() or { return }
+n := conn.query_int("SELECT COUNT(*) FROM orders") or { 0 }
+_ := shared <- release_conn(conn) or { false }
+```
+
+`SharedPool` is an actor, so it cannot be copied and its messages run one at a time. It opens connections on first use. The method is `release_conn`, not `release`, because Vira compilers before the fix for actor methods named `release` cannot compile that name.
 
 ---
 

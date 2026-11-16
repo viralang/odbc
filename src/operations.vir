@@ -264,7 +264,11 @@ pub fn build_paginated_sql(base_sql string, req PageRequest) string {
 		order_clause = " ORDER BY (SELECT NULL)"
 	}
 
-	if req.dialect == DIALECT_SQLSERVER || req.dialect == DIALECT_ORACLE {
+	if req.dialect == DIALECT_ORACLE {
+		// Oracle ODBC drivers reject a trailing `;` (ORA-00911).
+		return "${base_sql}${order_clause} OFFSET ${offset} ROWS FETCH NEXT ${page_size} ROWS ONLY"
+	}
+	if req.dialect == DIALECT_SQLSERVER {
 		return "${base_sql}${order_clause} OFFSET ${offset} ROWS FETCH NEXT ${page_size} ROWS ONLY;"
 	}
 	return "${base_sql}${order_clause} LIMIT ${page_size} OFFSET ${offset};"
@@ -285,7 +289,10 @@ pub fn build_keyset_sql(base_sql string, cursor_col string, last_seen_val string
 	}
 
 	esc := escape_literal(last_seen_val)
-	if dialect == DIALECT_SQLSERVER || dialect == DIALECT_ORACLE {
+	if dialect == DIALECT_ORACLE {
+		return "${base_sql} ${join_kw} ${cursor_col} ${op} '${esc}' ORDER BY ${cursor_col} ${dir} OFFSET 0 ROWS FETCH NEXT ${page_size} ROWS ONLY"
+	}
+	if dialect == DIALECT_SQLSERVER {
 		return "${base_sql} ${join_kw} ${cursor_col} ${op} '${esc}' ORDER BY ${cursor_col} ${dir} OFFSET 0 ROWS FETCH NEXT ${page_size} ROWS ONLY;"
 	}
 	return "${base_sql} ${join_kw} ${cursor_col} ${op} '${esc}' ORDER BY ${cursor_col} ${dir} LIMIT ${page_size};"
