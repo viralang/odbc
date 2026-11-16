@@ -36,7 +36,7 @@ fn make_sample_row(id string, service string, region string, latency string, hea
 
 fn main() {
 	println("============================================================================")
-	println("  VIRA UNIVERSAL ODBC DATABASE DRIVER — FULL OPERATIONS DEMO (v0.1.0)       ")
+	println("  VIRA UNIVERSAL ODBC DATABASE DRIVER — FULL OPERATIONS DEMO (v0.2.1)       ")
 	println("============================================================================")
 
 	// -------------------------------------------------------------------------
