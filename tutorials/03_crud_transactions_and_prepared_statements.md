@@ -1,6 +1,6 @@
 # Tutorial 3: Full Database Operations (CRUD, Batch Transactions & Prepared Statements)
 
-> **Package:** `odbc` (`v0.1.0`)  
+> **Package:** `odbc` (`v0.2.1`)  
 > **Source Files:** [`src/odbc.vir`](../src/odbc.vir), [`src/operations.vir`](../src/operations.vir)
 
 ---

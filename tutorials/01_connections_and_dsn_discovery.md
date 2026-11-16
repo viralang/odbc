@@ -1,6 +1,6 @@
 # Tutorial 1: Universal Database Connections, DSN Builders & Diagnostics
 
-> **Package:** `odbc` (`v0.1.0`)  
+> **Package:** `odbc` (`v0.2.1`)  
 > **Matching Example:** [`examples/universal_db_demo.vir`](../examples/universal_db_demo.vir)
 
 ---

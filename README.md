@@ -65,10 +65,10 @@ Or add it to your project's `vira.mod`:
 
 ```v
 module my_app
-vira 0.7.1
+vira 0.7.8
 
 require (
-	github.com/viralang/odbc v0.1.0
+	github.com/viralang/odbc v0.2.1
 )
 ```
 

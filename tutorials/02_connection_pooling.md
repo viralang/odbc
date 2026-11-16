@@ -1,6 +1,6 @@
 # Tutorial 2: OS Driver Manager Pooling & Managed `ConnectionPool`
 
-> **Package:** `odbc` (`v0.1.0`)  
+> **Package:** `odbc` (`v0.2.1`)  
 > **Source File:** [`src/pool.vir`](../src/pool.vir)
 
 ---

@@ -1,6 +1,6 @@
 # Tutorial 4: Retrieving Results, Export Formats (ASCII/CSV/JSON) & SQL Pagination
 
-> **Package:** `odbc` (`v0.1.0`)  
+> **Package:** `odbc` (`v0.2.1`)  
 > **Source Files:** [`src/types.vir`](../src/types.vir), [`src/operations.vir`](../src/operations.vir)
 
 ---
